@@ -68,6 +68,12 @@ jobs:
       - name: Expo prebuild（生成 Android 原生工程）
         run: npx expo prebuild --platform android --no-install --clean
 
+      - name: 修复 onnxruntime VersionNumber 兼容性（Gradle 9 已移除此 API）
+        run: |
+          find . -path "*/onnxruntime-react-native*/android/build.gradle" \
+            -exec sed -i 's/if (VersionNumber\.parse(REACT_NATIVE_VERSION) < VersionNumber\.parse("0\.71"))/if (false)/' {} \;
+          echo "patch applied"
+
       - name: Gradle 缓存
         uses: actions/cache@v4
         with:
