@@ -1,6 +1,7 @@
 /* eslint-disable no-undef */
 const fs = require("fs");
 const path = require("path");
+const { withProjectBuildGradle } = require("@expo/config-plugins");
 
 function dropLine(filePath, keyword) {
   if (!fs.existsSync(filePath)) return false;
@@ -62,8 +63,32 @@ process.on("beforeExit", function () {
   }
 });
 
+/**
+ * 把 ffmpeg-kit-next 的本地 Maven 仓库路径注入 android/build.gradle 的 allprojects.repositories。
+ * 新版 Gradle 不再向上传播子模块声明的 maven 仓库，必须在根 build.gradle 显式注册。
+ */
+function withFfmpegKitMavenRepo(config) {
+  return withProjectBuildGradle(config, function (cfg) {
+    const contents = cfg.modResults.contents;
+    // 已注入则跳过
+    if (contents.includes("ffmpeg-kit-react-native/android/libs-maven")) return cfg;
+    // 在 allprojects { repositories { ... } } 内的最后一个 maven 或 google() 之前插入
+    const injection = [
+      "        maven {",
+      "            // ffmpeg-kit-next 本地 AAR 仓库（richkuo7 vendor 构建，绕开 Maven Central 下架问题）",
+      "            url(new File(rootDir, \"../node_modules/ffmpeg-kit-react-native/android/libs-maven\").absolutePath)",
+      "        }",
+    ].join("\n");
+    cfg.modResults.contents = contents.replace(
+      /(allprojects\s*\{[^}]*repositories\s*\{)/,
+      "$1\n" + injection
+    );
+    return cfg;
+  });
+}
+
 function withGradleFixes(config) {
-  return config;
+  return withFfmpegKitMavenRepo(config);
 }
 
 module.exports = withGradleFixes;
