@@ -29,7 +29,7 @@ jobs:
       - name: 设置 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: 安装 pnpm
         uses: pnpm/action-setup@v4
@@ -57,11 +57,7 @@ jobs:
       - name: 设置 Android SDK（含 NDK 27 和 CMake）
         uses: android-actions/setup-android@v3
         with:
-          packages: |
-            platforms;android-36
-            build-tools;36.0.0
-            ndk;27.1.12297006
-            cmake;3.22.1
+          packages: "platforms;android-36 build-tools;36.0.0 ndk;27.1.12297006 cmake;3.22.1"
 
       - name: 安装依赖
         run: pnpm install --no-frozen-lockfile
