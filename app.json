@@ -1,0 +1,106 @@
+{
+  "expo": {
+    "name": "音乐转换大师",
+    "slug": "audio-converter-pro",
+    "version": "1.0.54",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "scheme": "audioconverter",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.miaoda.appdk2quyiid79d",
+      "buildNumber": "2",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ]
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0A1128"
+      },
+      "package": "com.miaoda.appdk2quyiid79d",
+      "predictiveBackGestureEnabled": false,
+      "versionCode": 6000,
+      "permissions": [
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-asset",
+      "expo-sqlite",
+      "expo-font",
+      "expo-system-ui",
+      [
+        "expo-document-picker",
+        {
+          "iCloudContainerEnvironment": "Production"
+        }
+      ],
+      "expo-file-system",
+      "expo-sharing",
+      "expo-audio",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#F97316",
+          "sounds": [],
+          "androidMode": "default",
+          "androidCollapsedTitle": "母带录制进行中"
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 24,
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36,
+            "buildToolsVersion": "36.0.0",
+            "kotlinVersion": "1.9.24",
+            "newArchEnabled": true
+          }
+        }
+      ],
+      "./plugins/android-audio-capture/withAndroidAudioCapture.js",
+      "@react-native-async-storage/expo-with-async-storage",
+      "expo-secure-store",
+      "@sentry/react-native",
+      "./plugins/withGradleFixes"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A1128"
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "39c964c5-82f5-439c-8037-13f9555fa55b"
+      }
+    },
+    "owner": "13882878880"
+  }
+}
