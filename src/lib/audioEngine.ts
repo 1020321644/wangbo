@@ -100,6 +100,68 @@ export async function resolveNativeUri(uri: string, ext: string): Promise<string
   return destUri;
 }
 
+// ── FFmpegKit 路径转换：剥离 file:// scheme，供 JNI 层使用，并记录诊断日志 ──────
+/**
+ * 将 file:// URI 转换为 FFmpegKit JNI 层可识别的 POSIX 路径。
+ * 所有传入 FFmpegKit 的输入/输出路径都必须经过此函数。
+ */
+export function toFFmpegPath(uri: string): string {
+  const path = uri.startsWith("file://") ? decodeURIComponent(uri.slice(7)) : uri;
+  console.log(`[FFmpegPath] ${uri.slice(0, 120)}\n         →  ${path.slice(0, 120)}`);
+  return path;
+}
+
+/**
+ * execFFmpegCmd — 统一执行 FFmpegKit 命令，含完整结构化日志。
+ * 每次调用打印：完整命令字符串、返回码(RC)、耗时、失败日志。
+ */
+async function execFFmpegCmd(
+  FFmpegKit: any,
+  ReturnCode: any,
+  command: string,
+  tag: string,
+  onProgress?: (p: number, label: string) => void,
+  durationMs?: number,
+  progressLabel?: string,
+): Promise<void> {
+  const startTime = Date.now();
+  console.log(`\n╔══[FFmpeg][${tag}]══════════════════════════════════════╗`);
+  console.log(`║ CMD: ${command}`);
+  console.log(`╚══════════════════════════════════════════════════════╝`);
+
+  await new Promise<void>((resolve, reject) => {
+    FFmpegKit.executeAsync(
+      command,
+      async (session: any) => {
+        const rc = await session.getReturnCode();
+        const elapsed = Date.now() - startTime;
+        const rcVal: number = typeof rc?.getValue === "function" ? rc.getValue() : Number(rc);
+        if (ReturnCode.isSuccess(rc)) {
+          console.log(`[FFmpeg][${tag}] ✅ RC=${rcVal} 耗时=${elapsed}ms`);
+          onProgress?.(1, `${progressLabel ?? tag} 完成`);
+          resolve();
+        } else {
+          const logs = await session.getOutput();
+          console.error(`[FFmpeg][${tag}] ❌ RC=${rcVal} 耗时=${elapsed}ms`);
+          console.error(`[FFmpeg][${tag}] 失败日志↓\n${logs ?? "(无日志)"}`);
+          reject(new Error(`FFmpeg[${tag}] RC=${rcVal}: ${logs?.slice(-400) ?? "无日志"}`));
+        }
+      },
+      (log: any) => {
+        const msg: string = log.getMessage?.() ?? "";
+        if (msg) console.log(`[FFmpeg][${tag}] ${msg}`);
+      },
+      (stats: any) => {
+        if (onProgress && durationMs) {
+          const t: number = stats.getTime?.() ?? 0;
+          const p = Math.min(t / durationMs, 0.97);
+          onProgress(Number(p.toFixed(3)), `${progressLabel ?? tag} · ${Math.round(p * 100)}%`);
+        }
+      },
+    );
+  });
+}
+
 // 确定性伪随机，保证同一文件每次生成相同波形/频谱
 function seededRandom(seed: number): () => number {
   let s = seed % 2147483647;
@@ -343,42 +405,65 @@ export async function runConvert(
 
   // ── 纯格式转换路径（masterEnhance=false）─────────────────────────────────
   onEngine?.("none");
+
+  // ① 诊断：源文件存在性 + 大小
+  const srcInfo = await FileSystem.getInfoAsync(nativeSrcUri);
+  console.log(`[audioEngine][诊断] sourceUri 原始: ${sourceUri}`);
+  console.log(`[audioEngine][诊断] nativeSrcUri  : ${nativeSrcUri}`);
+  console.log(`[audioEngine][诊断] 源文件: 存在=${srcInfo.exists}, 大小=${(srcInfo as any).size ?? 0}`);
+  console.log(`[audioEngine][诊断] outUri        : ${outUri}`);
+
+  // ② 强制路径转换：剥离 file:// scheme 供 FFmpegKit JNI 层使用
+  const rawSrc = toFFmpegPath(nativeSrcUri);
+  const rawOut = toFFmpegPath(outUri);
+
+  // ③ 步骤 1：先尝试 -c copy（最简命令），诊断 FFmpegKit 是否正常初始化
+  const copyCmd = `-i "${rawSrc}" -c copy -y "${rawOut}"`;
+  console.log("[audioEngine][步骤1] 发送 -c copy 简化测试命令...");
+  let copySucceeded = false;
+  try {
+    await execFFmpegCmd(FFmpegKit, ReturnCode, copyCmd, "copy-test");
+    const copyStat = await FileSystem.getInfoAsync(outUri);
+    copySucceeded = !!(copyStat.exists && (copyStat as any).size > 0);
+    console.log(`[audioEngine][步骤1] 结果: succeeded=${copySucceeded}, 大小=${(copyStat as any).size ?? 0}`);
+  } catch (copyErr) {
+    console.warn("[audioEngine][步骤1] -c copy 失败（FFmpegKit 可能无法工作）:", copyErr);
+  }
+
+  // 同格式（MP3→MP3 等）且 copy 成功 → 直接返回
+  const sourceExt = sourceName.split(".").pop()?.toLowerCase() ?? "";
+  if (copySucceeded && sourceExt === outExt) {
+    onProgress(1, "输出文件就绪（流复制）");
+    return outUri;
+  }
+
+  // ④ 步骤 2：完整重编码转换
   const ffmpegArgs = buildFfmpegArgs(target, params);
-  // file:// URI 直接传入 — 与初始版本保持一致，HarmonyOS 可正常识别
-  const command = `-i "${nativeSrcUri}" ${ffmpegArgs.join(" ")} -y "${outUri}"`;
-  console.log("[audioEngine] 格式转换:", command);
+  const command = `-i "${rawSrc}" ${ffmpegArgs.join(" ")} -y "${rawOut}"`;
+  console.log("[audioEngine][步骤2] 完整编码命令 ↓");
 
-  await new Promise<void>((resolve, reject) => {
-    FFmpegKit.executeAsync(
-      command,
-      async (session: import("ffmpeg-kit-react-native").FFmpegSession) => {
-        const rc = await session.getReturnCode();
-        if (ReturnCode.isSuccess(rc)) {
-          onProgress(1, "输出文件就绪");
-          resolve();
-        } else {
-          const logs = await session.getOutput();
-          console.error("[audioEngine] FFmpeg 失败:", logs);
-          reject(new Error(`FFmpeg 转换失败: ${logs?.slice(-200) ?? "未知错误"}`));
-        }
-      },
-      (log: import("ffmpeg-kit-react-native").Log) => console.log("[FFmpeg]", log.getMessage()),
-      (statistics: import("ffmpeg-kit-react-native").Statistics) => {
-        const t = statistics.getTime();
-        const p = Math.min(t / durationMs, 0.97);
-        onProgress(Number(p.toFixed(3)), `编码 ${target} · ${Math.round(p * 100)}%`);
-      },
-    );
-  });
+  try {
+    await execFFmpegCmd(FFmpegKit, ReturnCode, command, `convert-${target}`,
+      (p, l) => onProgress(p, l), durationMs, `编码 ${target}`);
+  } catch (convertErr) {
+    console.error("[audioEngine][步骤2] 完整转换失败:", convertErr);
+    // 降级：直接复制原文件
+    const fallExt = sourceName.split(".").pop()?.toLowerCase() ?? "audio";
+    const fallUri = `${cacheDir}fallback_${Date.now()}.${fallExt}`;
+    console.warn(`[audioEngine][降级] 拷贝原文件 → ${fallUri}`);
+    await FileSystem.copyAsync({ from: nativeSrcUri, to: fallUri });
+    onProgress(1, `已复制原文件（转换失败，保留原格式 ${fallExt.toUpperCase()}）`);
+    return fallUri;
+  }
 
-  // 验证输出
+  // ⑤ 验证输出
   const stat = await FileSystem.getInfoAsync(outUri);
-  if (!stat.exists || !stat.size || stat.size === 0) {
-    // 降级：复制原文件
+  console.log(`[audioEngine][验证] 输出: 存在=${stat.exists}, 大小=${(stat as any).size ?? 0}`);
+  if (!stat.exists || !(stat as any).size || (stat as any).size === 0) {
     const fallExt = sourceName.split(".").pop()?.toLowerCase() ?? "audio";
     const fallUri = `${cacheDir}fallback_${Date.now()}.${fallExt}`;
     await FileSystem.copyAsync({ from: nativeSrcUri, to: fallUri });
-    onProgress(1, `已复制原文件（转换失败，保留原格式 ${fallExt.toUpperCase()}）`);
+    onProgress(1, `已复制原文件（输出为空，保留原格式 ${fallExt.toUpperCase()}）`);
     return fallUri;
   }
   return outUri;
@@ -816,30 +901,20 @@ async function runFFmpegEnhance(
         "loudnorm=I=-16:TP=-1.5:LRA=11",
       ];
 
-  const command = `-i "${inputUri}" -af "${enhanceFilter.join(",")}" -ar 48000 -sample_fmt s32 -c:a pcm_s24le -y "${outputUri}"`;
-  console.log("[audioEngine] FFmpeg 增强:", command);
+  // 强制路径转换（诊断用）
+  const rawIn = toFFmpegPath(inputUri);
+  const rawOut2 = toFFmpegPath(outputUri);
 
-  await new Promise<void>((resolve, reject) => {
-    FFmpegKit.executeAsync(
-      command,
-      async (session: any) => {
-        const rc = await session.getReturnCode();
-        if (ReturnCode.isSuccess(rc)) {
-          onProgress(1, "母带增强完成（FFmpeg DSP）");
-          resolve();
-        } else {
-          const logs = await session.getOutput();
-          reject(new Error(`FFmpeg 增强失败: ${logs?.slice(-200) ?? ""}`));
-        }
-      },
-      (log: any) => console.log("[FFmpeg-Enhance]", log.getMessage()),
-      (statistics: any) => {
-        const t = statistics.getTime();
-        const p = Math.min(t / durationMs, 0.97);
-        onProgress(Number(p.toFixed(3)), `FFmpeg DSP · ${Math.round(p * 100)}%`);
-      },
-    );
-  });
+  // 诊断
+  const inInfo = await FileSystem.getInfoAsync(inputUri);
+  console.log(`[FFmpegEnhance][诊断] 输入: 存在=${inInfo.exists}, 大小=${(inInfo as any).size ?? 0}`);
+  console.log(`[FFmpegEnhance][路径] rawIn =${rawIn}`);
+  console.log(`[FFmpegEnhance][路径] rawOut=${rawOut2}`);
+
+  const command = `-i "${rawIn}" -af "${enhanceFilter.join(",")}" -ar 48000 -sample_fmt s32 -c:a pcm_s24le -y "${rawOut2}"`;
+
+  await execFFmpegCmd(FFmpegKit, ReturnCode, command, "enhance",
+    (p, l) => onProgress(p, l), durationMs, "FFmpeg DSP");
 }
 
 // ── 专业参数处理（EQ / 降噪 / 增益 / 动态处理），基于 FFmpeg ──────────────
@@ -891,38 +966,37 @@ export async function applyProcessing(
     if (info2) durationMs = parseFloat(String(info2.getDuration?.() ?? "0")) * 1000 || durationMs;
   } catch { /* 忽略 */ }
 
+  // 诊断：源文件
+  const procSrcInfo = await FileSystem.getInfoAsync(nativeSrcUri);
+  console.log(`[applyProcessing][诊断] nativeSrcUri: ${nativeSrcUri}`);
+  console.log(`[applyProcessing][诊断] 源文件: 存在=${procSrcInfo.exists}, 大小=${(procSrcInfo as any).size ?? 0}`);
+
+  // 强制路径转换
+  const rawProcSrc = toFFmpegPath(nativeSrcUri);
+  const rawProcOut = toFFmpegPath(outUri);
+  console.log(`[applyProcessing][路径] rawSrc=${rawProcSrc}`);
+  console.log(`[applyProcessing][路径] rawOut=${rawProcOut}`);
+
   const filterStr = filters.length > 0 ? filters.join(",") : "anull";
-  // file:// URI 直接传入 — 与初始版本保持一致，HarmonyOS FFmpegKit 正常识别
-  const command = `-i "${nativeSrcUri}" -af "${filterStr}" -ar 48000 -sample_fmt s32 -c:a pcm_s24le -y "${outUri}"`;
-  console.log("[audioEngine] 参数处理:", command);
+  const command = `-i "${rawProcSrc}" -af "${filterStr}" -ar 48000 -sample_fmt s32 -c:a pcm_s24le -y "${rawProcOut}"`;
 
-  await new Promise<void>((resolve, reject) => {
-    FFmpegKit.executeAsync(
-      command,
-      async (session: import("ffmpeg-kit-react-native").FFmpegSession) => {
-        const rc = await session.getReturnCode();
-        if (ReturnCode.isSuccess(rc)) {
-          onProgress(1, "处理完成");
-          resolve();
-        } else {
-          const logs = await session.getOutput();
-          reject(new Error(`参数处理失败: ${logs?.slice(-200) ?? "未知错误"}`));
-        }
-      },
-      (log: import("ffmpeg-kit-react-native").Log) => console.log("[FFmpeg-Proc]", log.getMessage()),
-      (statistics: import("ffmpeg-kit-react-native").Statistics) => {
-        const t = statistics.getTime();
-        const p = Math.min(t / durationMs, 0.97);
-        onProgress(Number(p.toFixed(3)), `处理中 · ${Math.round(p * 100)}%`);
-      },
-    );
-  });
-
-  const stat = await FileSystem.getInfoAsync(outUri);
-  if (!stat.exists || !stat.size || stat.size === 0) {
+  try {
+    await execFFmpegCmd(FFmpegKit, ReturnCode, command, "processing",
+      (p, l) => onProgress(p, l), durationMs, "处理中");
+  } catch (procErr) {
+    console.error("[applyProcessing] 处理失败:", procErr);
     const fallUri = `${cacheDir}proc_fallback_${Date.now()}.wav`;
     await FileSystem.copyAsync({ from: nativeSrcUri, to: fallUri });
     onProgress(1, "已复制原文件（处理失败，保留原始）");
+    return fallUri;
+  }
+
+  const stat = await FileSystem.getInfoAsync(outUri);
+  console.log(`[applyProcessing][验证] 输出: 存在=${stat.exists}, 大小=${(stat as any).size ?? 0}`);
+  if (!stat.exists || !(stat as any).size || (stat as any).size === 0) {
+    const fallUri = `${cacheDir}proc_fallback_${Date.now()}.wav`;
+    await FileSystem.copyAsync({ from: nativeSrcUri, to: fallUri });
+    onProgress(1, "已复制原文件（输出为空，保留原始）");
     return fallUri;
   }
   return outUri;
