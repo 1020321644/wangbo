@@ -2,7 +2,7 @@
   "expo": {
     "name": "ai音乐音频处理Pro",
     "slug": "audio-converter-pro",
-    "version": "1.0.90",
+    "version": "1.0.91",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
