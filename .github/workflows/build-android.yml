@@ -73,8 +73,17 @@ jobs:
       - name: Expo prebuild（生成 Android 原生工程）
         run: npx expo prebuild --platform android --no-install --clean
 
-      - name: 修复 onnxruntime VersionNumber 兼容性（已移除 ONNX，保留空步骤确保历史日志不断）
-        run: echo "ONNX Runtime 已完全移除，跳过补丁步骤"
+      - name: 修复 onnxruntime VersionNumber 兼容性
+        run: |
+          ORT_GRADLE="node_modules/onnxruntime-react-native/android/build.gradle"
+          if [ -f "$ORT_GRADLE" ]; then
+            # VersionNumber 类在当前 Gradle 不可用，且 RN 0.83 > 0.71 该分支恒为 false（死代码）
+            sed -i 's/if (VersionNumber.parse(REACT_NATIVE_VERSION) < VersionNumber.parse("0.71"))/if (false)/g' "$ORT_GRADLE"
+            echo "已修补 onnxruntime build.gradle VersionNumber 引用"
+            grep -n "VersionNumber\|if (false)" "$ORT_GRADLE" || echo "无 VersionNumber 残留"
+          else
+            echo "未找到 onnxruntime build.gradle，跳过"
+          fi
 
       - name: Gradle 缓存
         uses: actions/cache@v4
