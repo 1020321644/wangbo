@@ -1,13 +1,11 @@
 /**
  * modelBootstrap.ts — 内置 AI 模型解包
  *
- * 三个模型在构建期打包进 assets/models/，首次运行时
- * 释放到 documentDirectory/ai_models/ 供 ONNX Runtime 使用。
+ * 【测试版 v1.0.111】仅打包 GTCRN 降噪模型用于鸿蒙真机兼容性测试。
+ * 超分辨率模型（HiFi-GAN / NovaSR）暂不打包，待 GTCRN 测试通过后逐步加回。
  *
  * 模型版本：
  *   gtcrn   — GTCRN 16kHz 降噪（535 KB，腾讯/yuyun2000）
- *   novasr  — NovaSR 16k→48k 超分（229 KB，YatharthS/TigreGotico）
- *   hifiganbwe — HiFi-GAN+ BWE 带宽扩展（4.2 MB，brentspell/TigreGotico）
  */
 import { Asset } from "expo-asset";
 import * as FileSystem from "expo-file-system/legacy";
@@ -17,18 +15,14 @@ export const MODELS_DIR = (FileSystem.documentDirectory ?? "") + "ai_models/";
 
 /** 各模型在 documentDirectory 中的路径 */
 export const BUNDLED_MODEL_URIS: Readonly<Record<string, string>> = {
-  gtcrn:     MODELS_DIR + "gtcrn.onnx",
-  novasr:    MODELS_DIR + "novasr.onnx",
-  hifiganbwe: MODELS_DIR + "hifiganbwe.onnx",
+  gtcrn: MODELS_DIR + "gtcrn.onnx",
 };
 
 // ── Asset 来源（静态 require，Metro 打包时解析） ──────────────────────────────
 /* eslint-disable @typescript-eslint/no-require-imports */
 /* eslint-disable no-undef */
 const MODEL_ASSETS: Record<string, number> = {
-  gtcrn:     require("../../assets/models/gtcrn_16k.onnx") as number,
-  novasr:    require("../../assets/models/novasr.onnx") as number,
-  hifiganbwe: require("../../assets/models/hifiganbwe.onnx") as number,
+  gtcrn: require("../../assets/models/gtcrn_16k.onnx") as number,
 };
 /* eslint-enable no-undef */
 

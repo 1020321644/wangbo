@@ -461,7 +461,7 @@ export default function HomeScreen() {
                   params.masterEnhance && params.enhanceLevel === "advanced";
                 return (
                   <>
-                    {/* 简单模式 — DeepFilterNet 降噪（约 8.6MB） */}
+                    {/* 简单模式 — GTCRN 降噪（测试版） */}
                     <Pressable
                       onPress={() => {
                         if (isSimpleActive) {
@@ -501,12 +501,12 @@ export default function HomeScreen() {
                           "font-mono text-[9px] font-bold",
                           isSimpleActive ? "text-primary" : "text-muted-foreground"
                         )}>
-                          {isSimpleActive ? "DeepFilterNet" : "8.6MB"}
+                          {isSimpleActive ? "GTCRN 降噪" : "535KB"}
                         </Text>
                       </View>
                     </Pressable>
 
-                    {/* 困难模式 — AudioSR 超分辨率（约 100MB） */}
+                    {/* 困难模式 — 降噪增强（测试版，超分暂未包含） */}
                     <Pressable
                       onPress={() => {
                         if (isAdvancedActive) {
@@ -546,7 +546,7 @@ export default function HomeScreen() {
                           "font-mono text-[9px] font-bold",
                           isAdvancedActive ? "text-primary" : "text-muted-foreground"
                         )}>
-                          {isAdvancedActive ? "AudioSR" : "≤20MB"}
+                          {isAdvancedActive ? "降噪增强" : "测试版"}
                         </Text>
                       </View>
                     </Pressable>
@@ -555,18 +555,18 @@ export default function HomeScreen() {
               })()}
             </View>
 
-            {/* 简单模式 确认弹窗 — DeepFilterNet 降噪 */}
+            {/* 简单模式 确认弹窗 — GTCRN 降噪 */}
             <AlertDialog open={showEnhanceDialog} onOpenChange={setShowEnhanceDialog}>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>启用简单模式（DeepFilterNet）</AlertDialogTitle>
+                  <AlertDialogTitle>启用简单模式（GTCRN 降噪）</AlertDialogTitle>
                   <AlertDialogDescription>
-                    将调用 DeepFilterNet3 ONNX 模型（约 8.6MB）进行 AI 降噪增强，处理分三步：{"\n"}
-                    1. FFmpeg 预处理 → 48kHz WAV{"\n"}
+                    【测试版】将调用 GTCRN ONNX 降噪模型（535 KB）进行 AI 降噪增强：{"\n"}
+                    1. FFmpeg 预处理 → 16kHz WAV{"\n"}
                     2. ONNX 分块推理（AI 降噪）{"\n"}
                     3. FFmpeg 编码 → 目标格式{"\n\n"}
-                    处理时间约增加 3 倍，输出达发行级音质标准。{"\n"}
-                    若未导入 DeepFilterNet 模型，将自动降级为 FFmpeg DSP 内置增强。
+                    本测试版仅包含 GTCRN 降噪模型，用于验证鸿蒙真机兼容性。{"\n"}
+                    若 ONNX 加载失败，将自动降级为 FFmpeg DSP 内置增强。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -583,19 +583,15 @@ export default function HomeScreen() {
               </AlertDialogContent>
             </AlertDialog>
 
-            {/* 困难模式 确认弹窗 — AudioSR 超分辨率 */}
+            {/* 困难模式 确认弹窗 — 降噪增强（测试版） */}
             <AlertDialog open={showAdvancedDialog} onOpenChange={setShowAdvancedDialog}>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>启用困难模式（AudioSR）</AlertDialogTitle>
+                  <AlertDialogTitle>启用困难模式（降噪增强）</AlertDialogTitle>
                   <AlertDialogDescription>
-                    将调用 AudioSR 超分辨率 ONNX 模型（约 100MB）进行重度 AI 增强，{"\n"}
-                    重建高频细节与采样率，适合老旧/低质音源修复。处理分三步：{"\n"}
-                    1. FFmpeg 预处理 → 48kHz WAV{"\n"}
-                    2. AudioSR ONNX 分块推理（超分辨率重建）{"\n"}
-                    3. FFmpeg 编码 → 目标格式{"\n\n"}
-                    ⚠️ 首次加载 100MB 模型需 3-8 秒，单次处理耗时约为简单模式的 2-3 倍。{"\n"}
-                    若未导入 AudioSR 模型，将自动降级为 DeepFilterNet 简单模式。
+                    【测试版】本版本暂未包含超分辨率模型（HiFi-GAN/NovaSR）。{"\n"}
+                    困难模式将使用 GTCRN 降噪处理（与简单模式相同）。{"\n"}
+                    超分辨率能力将在 GTCRN 测试通过后逐步加回。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -615,7 +611,7 @@ export default function HomeScreen() {
             <DataRow label="采样率 SR" value={params.sampleRate} valueColor={C.cyan} />
             <DataRow label="位深 BD" value={targetInfo.supportsBitDepth ? params.bitDepth : "—"} valueColor={C.cyan} />
             <DataRow label="码率 BR" value={targetInfo.supportsBitrate ? params.bitrate : "—"} valueColor={C.cyan} />
-            <DataRow label="母带级提升" value={params.masterEnhance ? `ON · ${params.enhanceLevel === "advanced" ? "困难模式 AudioSR" : "简单模式 DeepFilterNet"}` : "OFF"} valueColor={params.masterEnhance ? C.orange : C.muted} />
+            <DataRow label="母带级提升" value={params.masterEnhance ? `ON · ${params.enhanceLevel === "advanced" ? "困难模式 降噪增强" : "简单模式 GTCRN 降噪"}` : "OFF"} valueColor={params.masterEnhance ? C.orange : C.muted} />
             <DataRow label="动态范围目标" value="DR14+" valueColor={C.cyan} />
             <DataRow label="响度标准" value="-14 LUFS (Streaming)" valueColor={C.cyan} />
             <DataRow label="限幅峰值" value="-0.3 dBFS" valueColor={C.cyan} />
