@@ -3,38 +3,6 @@ import * as FileSystem from "expo-file-system/legacy";
 
 // ─── FFmpeg 命令构建 ──────────────────────────────────────────────────────────
 
-/**
- * 母带级 DSP 滤镜链（替代 ONNX Runtime，100% 基于 FFmpegKit 内置滤镜）
- *
- * simple  — 降噪 + 多段 EQ + 压缩 + 限幅 + EBU R128 响度标准化
- *           等效 DeepFilterNet3 降噪效果（无 ONNX 依赖）
- * advanced — 更深 EQ 曲线 + 宽带提升 + 强压缩 + 精密限幅 + 严格响度
- *            等效 AudioSR 宽带提升效果（无 ONNX 依赖）
- *
- * 所有滤镜均为 libavfilter 标准内置，ffmpeg-kit 8.1.1 full 确认支持。
- */
-const MASTER_FILTER_SIMPLE =
-  "highpass=f=20," +
-  "equalizer=f=60:width_type=o:width=2:g=1.5," +
-  "equalizer=f=80:width_type=o:width=2:g=2," +
-  "equalizer=f=3000:width_type=o:width=2:g=0.5," +
-  "equalizer=f=12000:width_type=o:width=2:g=1.5," +
-  "acompressor=threshold=-20dB:ratio=3:attack=20:release=250:knee=5:makeup=2," +
-  "alimiter=limit=-0.3:attack=5:release=50:level_in=1," +
-  "loudnorm=I=-14:TP=-0.3:LRA=11:linear=true";
-
-const MASTER_FILTER_ADVANCED =
-  "highpass=f=20," +
-  "equalizer=f=50:width_type=o:width=2:g=2.0," +
-  "equalizer=f=150:width_type=o:width=1:g=-1.0," +
-  "equalizer=f=1000:width_type=o:width=1:g=0.5," +
-  "equalizer=f=5000:width_type=o:width=1:g=1.0," +
-  "equalizer=f=10000:width_type=o:width=2:g=2.0," +
-  "equalizer=f=16000:width_type=o:width=2:g=1.5," +
-  "acompressor=threshold=-24dB:ratio=4:attack=10:release=200:knee=6:makeup=3," +
-  "alimiter=limit=-0.3:attack=3:release=30:level_in=1," +
-  "loudnorm=I=-14:TP=-0.3:LRA=8:linear=true";
-
 /** 根据目标格式和参数生成 FFmpeg 参数列表（不含 -i 和输出路径） */
 function buildFfmpegArgs(target: AudioFormat, params: ConvertParams): string[] {
   const info = getFormat(target);
@@ -47,11 +15,10 @@ function buildFfmpegArgs(target: AudioFormat, params: ConvertParams): string[] {
   const bd = Number(params.bitDepth.replace(/[^\d]/g, "")) || 16;
   const kbps = params.bitrate.replace(/[^\d]/g, "") || "320";
 
-  // 母带增强滤镜：根据档位选择 DSP 滤镜链（FFmpeg 纯 DSP，无 ONNX 依赖）
-  const enhanceFilter = params.masterEnhance
-    ? (params.enhanceLevel === "advanced" ? MASTER_FILTER_ADVANCED : MASTER_FILTER_SIMPLE)
-    : null;
-  const masterFilters = enhanceFilter ? ["-af", enhanceFilter] : [];
+  // 母带增强滤镜：高通 + 多段均衡 + 响度标准化
+  const masterFilters = params.masterEnhance
+    ? ["-af", "highpass=f=20,equalizer=f=80:width_type=o:width=2:g=2,equalizer=f=12000:width_type=o:width=2:g=1,loudnorm=I=-14:TP=-0.3:LRA=11"]
+    : [];
 
   if (info.dsd) {
     // DSD 输出：PCM 高清上采样后封装至 DSD 容器
@@ -107,94 +74,6 @@ function safeCacheName(sourceName: string, ext: string): string {
   return `${base || "audio"}_${Date.now()}.${ext}`;
 }
 
-/**
- * 将 Android / HarmonyOS content:// URI 转换为本地缓存路径（保留 file:// 前缀，
- * 供 Expo FileSystem 操作使用）。如果已是 file:// 或原生路径则直接返回。
- *
- * 双重策略（防 HarmonyOS 崩溃）：
- *   1. FileSystem.copyAsync — 标准 Android，速度快。
- *   2. Base64 读写回退 — HarmonyOS 沙箱限制时启用，稍慢但可靠。
- */
-export async function resolveNativeUri(uri: string, ext: string): Promise<string> {
-  if (!uri.startsWith("content://")) return uri;
-  const safeExt = ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || "audio";
-  const destUri = `${FileSystem.cacheDirectory ?? ""}input_${Date.now()}.${safeExt}`;
-  // 策略1: copyAsync（标准 Android / 大多数设备）
-  try {
-    await FileSystem.copyAsync({ from: uri, to: destUri });
-    const info = await FileSystem.getInfoAsync(destUri);
-    if (info.exists && (info as any).size > 0) return destUri;
-  } catch (e1) {
-    console.warn("[resolveNativeUri] copyAsync 失败，切换 Base64 回退 (HarmonyOS):", e1);
-  }
-  // 策略2: Base64 读写（HarmonyOS 4.x 文件沙箱兼容方案）
-  const b64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
-  await FileSystem.writeAsStringAsync(destUri, b64, { encoding: FileSystem.EncodingType.Base64 });
-  return destUri;
-}
-
-// ── FFmpegKit 路径转换：剥离 file:// scheme，供 JNI 层使用，并记录诊断日志 ──────
-/**
- * 将 file:// URI 转换为 FFmpegKit JNI 层可识别的 POSIX 路径。
- * 所有传入 FFmpegKit 的输入/输出路径都必须经过此函数。
- */
-export function toFFmpegPath(uri: string): string {
-  const path = uri.startsWith("file://") ? decodeURIComponent(uri.slice(7)) : uri;
-  console.log(`[FFmpegPath] ${uri.slice(0, 120)}\n         →  ${path.slice(0, 120)}`);
-  return path;
-}
-
-/**
- * execFFmpegCmd — 统一执行 FFmpegKit 命令，含完整结构化日志。
- * 每次调用打印：完整命令字符串、返回码(RC)、耗时、失败日志。
- */
-async function execFFmpegCmd(
-  FFmpegKit: any,
-  ReturnCode: any,
-  command: string,
-  tag: string,
-  onProgress?: (p: number, label: string) => void,
-  durationMs?: number,
-  progressLabel?: string,
-): Promise<void> {
-  const startTime = Date.now();
-  console.log(`\n╔══[FFmpeg][${tag}]══════════════════════════════════════╗`);
-  console.log(`║ CMD: ${command}`);
-  console.log(`╚══════════════════════════════════════════════════════╝`);
-
-  await new Promise<void>((resolve, reject) => {
-    FFmpegKit.executeAsync(
-      command,
-      async (session: any) => {
-        const rc = await session.getReturnCode();
-        const elapsed = Date.now() - startTime;
-        const rcVal: number = typeof rc?.getValue === "function" ? rc.getValue() : Number(rc);
-        if (ReturnCode.isSuccess(rc)) {
-          console.log(`[FFmpeg][${tag}] ✅ RC=${rcVal} 耗时=${elapsed}ms`);
-          onProgress?.(1, `${progressLabel ?? tag} 完成`);
-          resolve();
-        } else {
-          const logs = await session.getOutput();
-          console.error(`[FFmpeg][${tag}] ❌ RC=${rcVal} 耗时=${elapsed}ms`);
-          console.error(`[FFmpeg][${tag}] 失败日志↓\n${logs ?? "(无日志)"}`);
-          reject(new Error(`FFmpeg[${tag}] RC=${rcVal}: ${logs?.slice(-400) ?? "无日志"}`));
-        }
-      },
-      (log: any) => {
-        const msg: string = log.getMessage?.() ?? "";
-        if (msg) console.log(`[FFmpeg][${tag}] ${msg}`);
-      },
-      (stats: any) => {
-        if (onProgress && durationMs) {
-          const t: number = stats.getTime?.() ?? 0;
-          const p = Math.min(t / durationMs, 0.97);
-          onProgress(Number(p.toFixed(3)), `${progressLabel ?? tag} · ${Math.round(p * 100)}%`);
-        }
-      },
-    );
-  });
-}
-
 // 确定性伪随机，保证同一文件每次生成相同波形/频谱
 function seededRandom(seed: number): () => number {
   let s = seed % 2147483647;
@@ -241,7 +120,7 @@ export function generateSpectrum(seedStr: string, bins = 48): number[] {
   return out;
 }
 
-/** AI 增强模式：simple=简单模式(FFmpeg DSP 降噪) / advanced=困难模式(FFmpeg DSP Pro 超分辨率) */
+/** AI 增强模式：simple=简单模式(DeepFilterNet 降噪) / advanced=困难模式(AudioSR 超分辨率) */
 export type EnhanceLevel = "simple" | "advanced";
 
 export interface ConvertParams {
@@ -251,7 +130,7 @@ export interface ConvertParams {
   masterEnhance: boolean;
   /** AI 增强档位（仅 masterEnhance=true 时生效；可选，默认 simple） */
   enhanceLevel?: EnhanceLevel;
-  /** 高质量模式：保持源参数，仅重新封装不重编码（-c copy） */
+  /** 高质量模式开关（预留参数） */
   highQuality?: boolean;
 }
 
@@ -315,14 +194,10 @@ export function losslessWarning(target: AudioFormat): string | null {
  * 真实音频转换执行器（基于 FFmpegKit）
  *
  * Native：调用 FFmpegKit 执行真实编解码，支持 MP3/FLAC/WAV/AAC/OGG/OPUS/M4A/WEBM。
- *   - masterEnhance=false → 纯格式转换（-c copy 优先）
- *   - masterEnhance=true + simple  → FFmpeg DSP 滤镜链（降噪/EQ/压缩/限幅/LUFS）
- *   - masterEnhance=true + advanced → FFmpeg DSP Pro（宽带提升/强压缩/精密限幅）
+ *   - masterEnhance=false → 纯格式转换
+ *   - masterEnhance=true + simple → DeepFilterNet3 ONNX 降噪（外部导入模型）→ 降级 FFmpeg DSP
+ *   - masterEnhance=true + advanced → AudioSR ONNX 超分辨率（外部导入模型）→ 降级 DeepFilterNet3 → 降级 FFmpeg DSP
  *   DSD 格式：FFmpeg 不支持 DSD 编码，自动降级为 WAV PCM 高清输出。
- *
- * ⚠️ 历史说明：原 ONNX Runtime（onnxruntime-react-native@1.17.x）在鸿蒙 4.2 Android
- *   兼容层上因 TurboModule JNI 加载失败导致 SIGABRT 崩溃（无法 try-catch 拦截）。
- *   已全面替换为 FFmpeg 纯 DSP 方案，彻底规避 .so 兼容性问题。
  * Web：仍使用文件复制占位（浏览器环境无 FFmpeg）。
  */
 export async function runConvert(
@@ -363,211 +238,577 @@ export async function runConvert(
   // ── Native：FFmpegKit 真实处理 ────────────────────────────────────────────
   const { FFmpegKit, FFprobeKit, ReturnCode } = await import("ffmpeg-kit-react-native");
 
-  // ⚠️ Android/HarmonyOS content:// URI → file:// 缓存（resolveNativeUri 双重策略保障）
-  // DocumentPicker(copyToCacheDirectory:true) → 已是 file:// → 直接透传给 FFmpegKit
-  const nativeSrcUri = await resolveNativeUri(sourceUri, sourceName.split(".").pop()?.toLowerCase() ?? "audio");
-
   // 获取音频时长（用于进度回调）
   let durationMs = estimateDuration(sourceSize ?? 0, target, params.masterEnhance);
   try {
-    // file:// URI 直接传入 FFmpegKit/FFprobeKit — HarmonyOS FFmpegKit 识别 file:// scheme
-    const probe = await FFprobeKit.getMediaInformation(nativeSrcUri);
+    const probe = await FFprobeKit.getMediaInformation(sourceUri);
     const info2 = probe.getMediaInformation?.();
     if (info2) durationMs = parseFloat(String(info2.getDuration?.() ?? "0")) * 1000 || durationMs;
   } catch { /* 忽略 */ }
 
-  // ── 增强路径标记 ─────────────────────────────────────────────────────────
-  // masterEnhance=true → FFmpeg DSP 滤镜链（已在 buildFfmpegArgs 内嵌入 -af 参数）
-  onEngine?.(params.masterEnhance ? "ffmpeg-dsp" : "none");
+  const startTs = Date.now();
 
-  // ① 诊断：源文件存在性 + 大小
-  const srcInfo = await FileSystem.getInfoAsync(nativeSrcUri);
-  console.log(`[audioEngine][诊断] sourceUri 原始: ${sourceUri}`);
-  console.log(`[audioEngine][诊断] nativeSrcUri  : ${nativeSrcUri}`);
-  console.log(`[audioEngine][诊断] 源文件: 存在=${srcInfo.exists}, 大小=${(srcInfo as any).size ?? 0}`);
-  console.log(`[audioEngine][诊断] outUri        : ${outUri}`);
+  // ── 母带增强路径（masterEnhance=true）────────────────────────────────────
+  if (params.masterEnhance) {
+    const level = params.enhanceLevel ?? "simple";
 
-  // ② 强制路径转换：剥离 file:// scheme 供 FFmpegKit JNI 层使用
-  const rawSrc = toFFmpegPath(nativeSrcUri);
-  const rawOut = toFFmpegPath(outUri);
-
-  // ③ 高质量模式：仅重新封装不重编码（-c copy），保留源参数
-  if (params.highQuality) {
-    const copyCmd = `-i "${rawSrc}" -c copy -y "${rawOut}"`;
-    console.log("[audioEngine][高质量模式] 发送 -c copy 命令...");
-    try {
-      await execFFmpegCmd(FFmpegKit, ReturnCode, copyCmd, "highquality-copy",
-        (p, l) => onProgress(p, l), durationMs, "高质量封装");
-      const stat = await FileSystem.getInfoAsync(outUri);
-      if (stat.exists && (stat as any).size > 0) {
-        onProgress(1, "输出文件就绪（高质量封装）");
-        return outUri;
+    // ── 尝试 ONNX 推理 ─────────────────────────────────────────────────────
+    // 困难模式：GTCRN 降噪 → HiFi-GAN+ BWE 带宽扩展（输出 48kHz）
+    if (level === "advanced") {
+      try {
+        const { useModelStore } = await import("@/store/modelStore");
+        const { resolvModelUri } = await import("@/lib/modelBootstrap");
+        const gtcrnUri = resolvModelUri("gtcrn",     useModelStore.getState().getModelUri("gtcrn"));
+        const bweUri   = resolvModelUri("hifiganbwe", useModelStore.getState().getModelUri("hifiganbwe"));
+        if (gtcrnUri) {
+          const tempUri = `${cacheDir}gtcrn_tmp_${Date.now()}.wav`;
+          onEngine?.("deepfilternet");
+          const denoised = await runGTCRNOnnx(sourceUri, tempUri, gtcrnUri,
+            (p, l) => onProgress(p * (bweUri ? 0.48 : 0.95), l));
+          if (denoised && bweUri) {
+            onEngine?.("audiosr");
+            const bweOk = await runHiFiGANBWEOnnx(tempUri, outUri, bweUri,
+              (p, l) => onProgress(0.48 + p * 0.5, l));
+            await FileSystem.deleteAsync(tempUri, { idempotent: true }).catch(() => {});
+            if (bweOk) { onProgress(1, "困难模式：降噪 + 带宽扩展完成"); return outUri; }
+          } else if (denoised) {
+            await FileSystem.copyAsync({ from: tempUri, to: outUri });
+            await FileSystem.deleteAsync(tempUri, { idempotent: true }).catch(() => {});
+            onProgress(1, "GTCRN 降噪完成");
+            return outUri;
+          }
+          await FileSystem.deleteAsync(tempUri, { idempotent: true }).catch(() => {});
+        }
+      } catch (e) {
+        console.warn("[audioEngine] 困难模式 ONNX 失败，降级 FFmpeg DSP:", e);
       }
-      console.warn("[audioEngine][高质量模式] -c copy 输出为空，降级重编码");
-    } catch (copyErr) {
-      console.warn("[audioEngine][高质量模式] -c copy 失败，降级重编码:", copyErr);
     }
-  }
 
-  // ④ 步骤 1：先尝试 -c copy（最简命令），诊断 FFmpegKit 是否正常初始化
-  const copyCmd = `-i "${rawSrc}" -c copy -y "${rawOut}"`;
-  console.log("[audioEngine][步骤1] 发送 -c copy 简化测试命令...");
-  let copySucceeded = false;
-  try {
-    await execFFmpegCmd(FFmpegKit, ReturnCode, copyCmd, "copy-test");
-    const copyStat = await FileSystem.getInfoAsync(outUri);
-    copySucceeded = !!(copyStat.exists && (copyStat as any).size > 0);
-    console.log(`[audioEngine][步骤1] 结果: succeeded=${copySucceeded}, 大小=${(copyStat as any).size ?? 0}`);
-  } catch (copyErr) {
-    console.warn("[audioEngine][步骤1] -c copy 失败（FFmpegKit 可能无法工作）:", copyErr);
-  }
+    if (level === "simple" || level === "advanced") {
+      // 简单模式 / 困难模式降级：GTCRN 降噪
+      try {
+        const { useModelStore } = await import("@/store/modelStore");
+        const { resolvModelUri } = await import("@/lib/modelBootstrap");
+        const gtcrnUri = resolvModelUri("gtcrn", useModelStore.getState().getModelUri("gtcrn"));
+        if (gtcrnUri) {
+          onEngine?.("deepfilternet");
+          onProgress(0.02, "加载 GTCRN 降噪模型...");
+          const result = await runGTCRNOnnx(sourceUri, outUri, gtcrnUri, (p, label) => onProgress(p, label));
+          if (result) {
+            onProgress(1, "GTCRN 降噪完成");
+            return outUri;
+          }
+        }
+      } catch (e) {
+        console.warn("[audioEngine] GTCRN ONNX 失败，降级 FFmpeg DSP:", e);
+      }
+    }
 
-  // 同格式（MP3→MP3 等）且 copy 成功 → 直接返回
-  const sourceExt = sourceName.split(".").pop()?.toLowerCase() ?? "";
-  if (copySucceeded && sourceExt === outExt) {
-    onProgress(1, "输出文件就绪（流复制）");
+    // ONNX 不可用 → FFmpeg DSP 增强兜底
+    onEngine?.("ffmpeg-dsp");
+    onProgress(0.02, "FFmpeg DSP 增强（无 ONNX 模型）...");
+    await runFFmpegEnhance(sourceUri, outUri, params, durationMs, startTs, onProgress, FFmpegKit, ReturnCode);
     return outUri;
   }
 
-  // ⑤ 步骤 2：完整重编码转换
+  // ── 纯格式转换路径（masterEnhance=false）─────────────────────────────────
+  onEngine?.("none");
   const ffmpegArgs = buildFfmpegArgs(target, params);
-  const command = `-i "${rawSrc}" ${ffmpegArgs.join(" ")} -y "${rawOut}"`;
-  console.log("[audioEngine][步骤2] 完整编码命令 ↓");
+  const command = `-i "${sourceUri}" ${ffmpegArgs.join(" ")} -y "${outUri}"`;
+  console.log("[audioEngine] 格式转换:", command);
 
-  try {
-    await execFFmpegCmd(FFmpegKit, ReturnCode, command, `convert-${target}`,
-      (p, l) => onProgress(p, l), durationMs, `编码 ${target}`);
-  } catch (convertErr) {
-    console.error("[audioEngine][步骤2] 完整转换失败:", convertErr);
-    // ⑥ 降级：MediaCodec 硬件编码（AAC，兼容性兜底）
-    console.warn("[audioEngine][步骤3] 尝试 MediaCodec 硬件编码降级...");
-    const mcBitrate = Number(params.bitrate.replace(/[^\d]/g, "") || "320");
-    const mcCmd = `-i "${rawSrc}" -c:a aac_mediacodec -b:a ${mcBitrate}k -ar ${sampleRateNumOf(params)} -y "${rawOut}"`;
-    try {
-      await execFFmpegCmd(FFmpegKit, ReturnCode, mcCmd, "mediacodec-fallback",
-        (p, l) => onProgress(p, l), durationMs, "硬件编码降级");
-      const mcStat = await FileSystem.getInfoAsync(outUri);
-      if (mcStat.exists && (mcStat as any).size > 0) {
-        onProgress(1, "输出文件就绪（硬件编码降级）");
-        return outUri;
-      }
-    } catch (mcErr) {
-      console.error("[audioEngine][步骤3] MediaCodec 降级失败:", mcErr);
-    }
-    // 最终兜底：直接复制原文件
+  await new Promise<void>((resolve, reject) => {
+    FFmpegKit.executeAsync(
+      command,
+      async (session: import("ffmpeg-kit-react-native").FFmpegSession) => {
+        const rc = await session.getReturnCode();
+        if (ReturnCode.isSuccess(rc)) {
+          onProgress(1, "输出文件就绪");
+          resolve();
+        } else {
+          const logs = await session.getOutput();
+          console.error("[audioEngine] FFmpeg 失败:", logs);
+          reject(new Error(`FFmpeg 转换失败: ${logs?.slice(-200) ?? "未知错误"}`));
+        }
+      },
+      (log: import("ffmpeg-kit-react-native").Log) => console.log("[FFmpeg]", log.getMessage()),
+      (statistics: import("ffmpeg-kit-react-native").Statistics) => {
+        const t = statistics.getTime();
+        const p = Math.min(t / durationMs, 0.97);
+        onProgress(Number(p.toFixed(3)), `编码 ${target} · ${Math.round(p * 100)}%`);
+      },
+    );
+  });
+
+  // 验证输出
+  const stat = await FileSystem.getInfoAsync(outUri);
+  if (!stat.exists || !stat.size || stat.size === 0) {
+    // 降级：复制原文件
     const fallExt = sourceName.split(".").pop()?.toLowerCase() ?? "audio";
     const fallUri = `${cacheDir}fallback_${Date.now()}.${fallExt}`;
-    console.warn(`[audioEngine][降级] 拷贝原文件 → ${fallUri}`);
-    await FileSystem.copyAsync({ from: nativeSrcUri, to: fallUri });
+    await FileSystem.copyAsync({ from: sourceUri, to: fallUri });
     onProgress(1, `已复制原文件（转换失败，保留原格式 ${fallExt.toUpperCase()}）`);
     return fallUri;
   }
-
-  // ⑦ 验证输出
-  const stat = await FileSystem.getInfoAsync(outUri);
-  console.log(`[audioEngine][验证] 输出: 存在=${stat.exists}, 大小=${(stat as any).size ?? 0}`);
-  if (!stat.exists || !(stat as any).size || (stat as any).size === 0) {
-    const fallExt = sourceName.split(".").pop()?.toLowerCase() ?? "audio";
-    const fallUri = `${cacheDir}fallback_${Date.now()}.${fallExt}`;
-    await FileSystem.copyAsync({ from: nativeSrcUri, to: fallUri });
-    onProgress(1, `已复制原文件（输出为空，保留原格式 ${fallExt.toUpperCase()}）`);
-    return fallUri;
-  }
   return outUri;
-}
-
-/** 从 ConvertParams.sampleRate 解析 Hz 数值（用于 MediaCodec 降级） */
-function sampleRateNumOf(params: ConvertParams): number {
-  const srRaw = params.sampleRate.replace(/kHz$/i, "").trim();
-  const srFloat = parseFloat(srRaw);
-  return Math.round(srFloat * (srFloat < 400 ? 1000 : 1));
 }
 
 // ── STFT / ISTFT 工具函数（供 GTCRN 使用） ──────────────────────────────────
 
-// ── 专业参数处理（EQ / 降噪 / 增益 / 动态处理），基于 FFmpeg ──────────────
+const GTCRN_N_FFT = 512;
+const GTCRN_HOP   = 256;
+const GTCRN_SR    = 16000;
+const GTCRN_BINS  = GTCRN_N_FFT / 2 + 1; // 257
+
+function _makeHannWindow(N: number): Float32Array {
+  const w = new Float32Array(N);
+  for (let i = 0; i < N; i++) w[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
+  return w;
+}
+
+/** 原地 Cooley-Tukey FFT（迭代，仅处理 2 的幂次长度） */
+function _fftInPlace(re: Float32Array, im: Float32Array): void {
+  const N = re.length;
+  // 位反转
+  for (let i = 1, j = 0; i < N; i++) {
+    let bit = N >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      let t = re[i]; re[i] = re[j]; re[j] = t;
+      t = im[i]; im[i] = im[j]; im[j] = t;
+    }
+  }
+  // 蝴蝶运算
+  for (let len = 2; len <= N; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr0 = Math.cos(ang), wi0 = Math.sin(ang);
+    const half = len >> 1;
+    for (let i = 0; i < N; i += len) {
+      let wr = 1.0, wi = 0.0;
+      for (let j = 0; j < half; j++) {
+        const u = i + j, v = u + half;
+        const tr = re[v] * wr - im[v] * wi;
+        const ti = re[v] * wi + im[v] * wr;
+        re[v] = re[u] - tr; im[v] = im[u] - ti;
+        re[u] += tr;        im[u] += ti;
+        const tmp = wr * wr0 - wi * wi0;
+        wi = wr * wi0 + wi * wr0;
+        wr = tmp;
+      }
+    }
+  }
+}
+
+/** STFT：返回每帧 257 个复数频谱 bin */
+function _stftFrames(
+  pcm: Float32Array,
+  win: Float32Array,
+): Array<{ re: Float32Array; im: Float32Array }> {
+  const N = GTCRN_N_FFT, hop = GTCRN_HOP, bins = GTCRN_BINS;
+  const bufRe = new Float32Array(N), bufIm = new Float32Array(N);
+  const frames: Array<{ re: Float32Array; im: Float32Array }> = [];
+  const pad = N >> 1;
+  const padded = new Float32Array(pcm.length + pad * 2);
+  padded.set(pcm, pad);
+  for (let start = 0; start < pcm.length; start += hop) {
+    bufRe.fill(0); bufIm.fill(0);
+    for (let k = 0; k < N; k++) bufRe[k] = (padded[start + k] ?? 0) * win[k];
+    _fftInPlace(bufRe, bufIm);
+    frames.push({ re: new Float32Array(bufRe.subarray(0, bins)), im: new Float32Array(bufIm.subarray(0, bins)) });
+  }
+  return frames;
+}
+
+/** ISTFT：overlap-add 重建波形 */
+function _istftFrames(
+  frames: Array<{ re: Float32Array; im: Float32Array }>,
+  origLen: number,
+  win: Float32Array,
+): Float32Array {
+  const N = GTCRN_N_FFT, hop = GTCRN_HOP, pad = N >> 1;
+  const out   = new Float32Array(origLen + N);
+  const wsum  = new Float32Array(origLen + N);
+  const bufRe = new Float32Array(N), bufIm = new Float32Array(N);
+  for (let f = 0; f < frames.length; f++) {
+    const { re, im } = frames[f];
+    bufRe.fill(0); bufIm.fill(0);
+    for (let k = 0; k < re.length; k++) { bufRe[k] = re[k]; bufIm[k] = im[k]; }
+    // 恢复共轭对称（负频率）
+    for (let k = 1; k < N / 2; k++) { bufRe[N - k] = re[k]; bufIm[N - k] = -im[k]; }
+    // IFFT = conj(FFT(conj(x))) / N
+    for (let k = 0; k < N; k++) bufIm[k] = -bufIm[k];
+    _fftInPlace(bufRe, bufIm);
+    const start = f * hop;
+    for (let k = 0; k < N; k++) {
+      const w = win[k];
+      out[start + k]  += (bufRe[k] / N) * w;
+      wsum[start + k] += w * w;
+    }
+  }
+  const result = new Float32Array(origLen);
+  for (let i = 0; i < origLen; i++) {
+    const ws = wsum[i + pad];
+    result[i] = ws > 1e-8 ? out[i + pad] / ws : 0;
+  }
+  return result;
+}
+
+/** 线性插值重采样（适用于 SR 转换） */
+function _linearResample(pcm: Float32Array, srcSR: number, dstSR: number): Float32Array {
+  if (srcSR === dstSR) return pcm;
+  const ratio = dstSR / srcSR;
+  const outLen = Math.round(pcm.length * ratio);
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const src = i / ratio;
+    const lo = Math.floor(src);
+    const frac = src - lo;
+    out[i] = pcm[lo] + (pcm[Math.min(lo + 1, pcm.length - 1)] - pcm[lo]) * frac;
+  }
+  return out;
+}
+
+/** WAV 解析：返回单声道 float32 PCM + 采样率 */
+function _parseWav(raw: Uint8Array): { pcm: Float32Array; sr: number } | null {
+  if (raw.length < 44) return null;
+  const view = new DataView(raw.buffer);
+  const nCh  = view.getUint16(22, true);
+  const sr   = view.getUint32(24, true);
+  const bps  = view.getUint16(34, true);
+  const dataOff = 44;
+  const bytesPS = Math.ceil(bps / 8);
+  const nSamples = Math.floor((raw.length - dataOff) / bytesPS);
+  const pcm = new Float32Array(nSamples / nCh);
+  for (let i = 0; i < pcm.length; i++) {
+    let sum = 0;
+    for (let ch = 0; ch < nCh; ch++) {
+      const off = dataOff + (i * nCh + ch) * bytesPS;
+      if (bps === 16) sum += view.getInt16(off, true) / 32768.0;
+      else if (bps === 24) {
+        let v = raw[off] | (raw[off + 1] << 8) | (raw[off + 2] << 16);
+        if (v & 0x800000) v |= ~0xFFFFFF;
+        sum += v / 8388608.0;
+      } else sum += view.getFloat32(off, true);
+    }
+    pcm[i] = sum / nCh;
+  }
+  return { pcm, sr };
+}
+
+/** 编码单声道 float32 PCM 为 WAV 24-bit */
+function _encodePcmToWav24(pcm: Float32Array, sampleRate: number): Uint8Array {
+  const bytes = new Uint8Array(44 + pcm.length * 3);
+  const view  = new DataView(bytes.buffer);
+  bytes.set([82,73,70,70]); view.setUint32(4, 36 + pcm.length*3, true);
+  bytes.set([87,65,86,69,102,109,116,32], 8); view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate*3, true);
+  view.setUint16(32, 3, true); view.setUint16(34, 24, true);
+  bytes.set([100,97,116,97], 36); view.setUint32(40, pcm.length*3, true);
+  for (let i = 0; i < pcm.length; i++) {
+    let v = Math.max(-1, Math.min(1, pcm[i]));
+    let s = Math.round(v * 8388607);
+    if (s < 0) s += 0x1000000;
+    view.setUint8(44 + i*3,     s & 0xFF);
+    view.setUint8(44 + i*3 + 1, (s >> 8) & 0xFF);
+    view.setUint8(44 + i*3 + 2, (s >> 16) & 0xFF);
+  }
+  return bytes;
+}
+
+// ── GTCRN ONNX 推理（真实接口：STFT 帧→帧流式降噪） ─────────────────────────
 /**
- * applyProcessing — 对音频应用专业处理参数（EQ/降噪/增益/压缩/限幅/LUFS）。
- * Native：FFmpegKit 真实滤镜链处理；Web：占位模拟。
+ * GTCRN 16kHz 降噪推理
+ *
+ * 模型：yuyun2000/SpeechDenoiser（腾讯 GTCRN，Apache-2.0）
+ * ONNX 接口（每帧流式处理）：
+ *   输入：
+ *     mix          float32 [1, 257, 1, 2]   — 当前 STFT 帧（实部+虚部）
+ *     conv_cache   float32 [2, 1, 16, 16, 33]
+ *     tra_cache    float32 [2, 3, 1,  1, 16]
+ *     inter_cache  float32 [2, 1, 33, 16]
+ *   输出：
+ *     enh              float32 [1, 257, 1, 2] — 增强后 STFT 帧
+ *     conv_cache_out   float32 [2, 1, 16, 16, 33]
+ *     tra_cache_out    float32 [2, 3, 1,  1, 16]
+ *     inter_cache_out  float32 [2, 1, 33, 16]
+ *
+ * 参数：N_FFT=512，hop=256，win=hann，SR=16kHz
  */
-export async function applyProcessing(
-  sourceUri: string,
-  sourceName: string,
-  filters: string[],
+async function runGTCRNOnnx(
+  inputUri: string,
+  outputUri: string,
+  modelUri: string,
   onProgress: (p: number, label: string) => void,
-  sourceSize?: number,
-): Promise<string> {
-  const cacheDir = FileSystem.cacheDirectory ?? "";
-  const outName = safeCacheName(sourceName, "wav");
-  const outUri = `${cacheDir}processed_${outName}`;
+): Promise<boolean> {
+  try {
+    const { InferenceSession, Tensor } = await import("onnxruntime-react-native");
+    const FileSystemLeg = await import("expo-file-system/legacy");
 
-  // Web 占位
-  if (process.env.EXPO_OS === "web") {
-    const total = estimateDuration(sourceSize ?? 0, "WAV", true);
-    const start = Date.now();
-    const STAGES = ["读取源文件", "构建滤镜链", "FFmpeg 处理", "写入输出"];
-    return new Promise((resolve) => {
-      let si = 0;
-      const tick = () => {
-        const elapsed = Date.now() - start;
-        const p = Math.min(1, elapsed / total);
-        si = Math.min(Math.floor(p * STAGES.length), STAGES.length - 1);
-        onProgress(Number(p.toFixed(3)), STAGES[si]);
-        if (p >= 1) { onProgress(1, "处理完成"); resolve(sourceUri); }
-        else setTimeout(tick, 60);
-      };
-      tick();
+    onProgress(0.03, "GTCRN：读取音频…");
+    const b64 = await FileSystemLeg.readAsStringAsync(inputUri, { encoding: "base64" });
+    const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    const parsed = _parseWav(raw);
+    if (!parsed) return false;
+    const { pcm, sr } = parsed;
+
+    // 确认模型文件存在
+    const finfo = await FileSystemLeg.getInfoAsync(modelUri);
+    if (!finfo.exists) { console.warn("[audioEngine] GTCRN model not found:", modelUri); return false; }
+
+    // 重采样到 16kHz
+    const inputPcm = _linearResample(pcm, sr, GTCRN_SR);
+    onProgress(0.12, "GTCRN：加载模型…");
+
+    const session = await InferenceSession.create(modelUri, {
+      executionProviders: ["cpu"],
+      graphOptimizationLevel: "all",
     });
+
+    onProgress(0.22, "GTCRN：STFT 分帧…");
+    const win    = _makeHannWindow(GTCRN_N_FFT);
+    const frames = _stftFrames(inputPcm, win);
+
+    // 初始化流式缓存（全零）
+    let convCache  = new Float32Array(2 * 1 * 16 * 16 * 33);  // [2,1,16,16,33]
+    let traCache   = new Float32Array(2 * 3 * 1 * 1 * 16);    // [2,3,1,1,16]
+    let interCache = new Float32Array(2 * 1 * 33 * 16);       // [2,1,33,16]
+
+    const enhFrames: Array<{ re: Float32Array; im: Float32Array }> = [];
+
+    for (let f = 0; f < frames.length; f++) {
+      const { re, im } = frames[f];
+      // 打包为 [1, 257, 1, 2]：逐 bin 交织 real/imag
+      const mix = new Float32Array(GTCRN_BINS * 2);
+      for (let b = 0; b < GTCRN_BINS; b++) { mix[b * 2] = re[b]; mix[b * 2 + 1] = im[b]; }
+
+      const result = await session.run({
+        mix:         new Tensor("float32", mix,        [1, GTCRN_BINS, 1, 2]),
+        conv_cache:  new Tensor("float32", convCache,  [2, 1, 16, 16, 33]),
+        tra_cache:   new Tensor("float32", traCache,   [2, 3, 1, 1, 16]),
+        inter_cache: new Tensor("float32", interCache, [2, 1, 33, 16]),
+      });
+
+      const enh = result["enh"]?.data as Float32Array ?? mix;
+      const enhRe = new Float32Array(GTCRN_BINS);
+      const enhIm = new Float32Array(GTCRN_BINS);
+      for (let b = 0; b < GTCRN_BINS; b++) { enhRe[b] = enh[b * 2]; enhIm[b] = enh[b * 2 + 1]; }
+      enhFrames.push({ re: enhRe, im: enhIm });
+
+      // 更新流式缓存（double cast: TensorData → unknown → Float32Array）
+      convCache  = new Float32Array((result["conv_cache_out"]?.data  ?? convCache) as unknown as ArrayBuffer);
+      traCache   = new Float32Array((result["tra_cache_out"]?.data   ?? traCache)  as unknown as ArrayBuffer);
+      interCache = new Float32Array((result["inter_cache_out"]?.data ?? interCache) as unknown as ArrayBuffer);
+
+      if (f % 80 === 0) {
+        onProgress(0.22 + 0.70 * (f / frames.length), `GTCRN 降噪：${Math.round((f / frames.length) * 100)}%`);
+      }
+    }
+
+    onProgress(0.94, "GTCRN：合成增强音频…");
+    const enhanced = _istftFrames(enhFrames, inputPcm.length, win);
+    const wavBytes = _encodePcmToWav24(enhanced, GTCRN_SR);
+    const b64Out   = btoa(String.fromCharCode(...Array.from(wavBytes)));
+    await FileSystemLeg.writeAsStringAsync(outputUri, b64Out, { encoding: "base64" });
+
+    onProgress(0.99, "GTCRN：完成");
+    console.log("[audioEngine] ✅ GTCRN 降噪完成，帧数:", frames.length);
+    return true;
+  } catch (e) {
+    console.error("[audioEngine] GTCRN 推理失败:", e);
+    return false;
   }
+}
 
-  const { FFmpegKit, FFprobeKit, ReturnCode } = await import("ffmpeg-kit-react-native");
+// ── HiFi-GAN+ BWE ONNX 推理（带宽扩展超分辨率，任意SR → 48kHz） ────────────
+/**
+ * HiFi-GAN+ Bandwidth Extension 推理
+ *
+ * 模型：brentspell/hifi-gan-bwe（MIT）→ TigreGotico/audiosronnx-hifiganbwe
+ * ONNX 接口（时域，一次推理全帧）：
+ *   输入：audio  float32 [1, 1, T+padding]  — kaiser 升采样至 48kHz + 反射填充
+ *   输出：wavenet_out float32 [1, 1, T+padding]
+ *   后处理：tanh(output)，截去两端 padding
+ *
+ * 感受野：13120 samples（2 stacks × 8 layers，dilation base 3，kernel 3）
+ */
+const HIFIGAN_OUT_SR          = 48000;
+const HIFIGAN_RECEPTIVE_FIELD = 13120;
 
-  // ⚠️ Android/HarmonyOS content:// URI → file:// 缓存（resolveNativeUri 双重策略保障）
-  // DocumentPicker(copyToCacheDirectory:true) → 已是 file:// → 直接透传给 FFmpegKit
-  const nativeSrcUri = await resolveNativeUri(sourceUri, sourceName.split(".").pop()?.toLowerCase() ?? "audio");
-
-  let durationMs = estimateDuration(sourceSize ?? 0, "WAV", true);
+async function runHiFiGANBWEOnnx(
+  inputUri: string,
+  outputUri: string,
+  modelUri: string,
+  onProgress: (p: number, label: string) => void,
+): Promise<boolean> {
   try {
-    // file:// URI 直接传入 — HarmonyOS FFmpegKit 识别 file:// scheme
-    const probe = await FFprobeKit.getMediaInformation(nativeSrcUri);
-    const info2 = probe.getMediaInformation?.();
-    if (info2) durationMs = parseFloat(String(info2.getDuration?.() ?? "0")) * 1000 || durationMs;
-  } catch { /* 忽略 */ }
+    const { InferenceSession, Tensor } = await import("onnxruntime-react-native");
+    const FileSystemLeg = await import("expo-file-system/legacy");
 
-  // 诊断：源文件
-  const procSrcInfo = await FileSystem.getInfoAsync(nativeSrcUri);
-  console.log(`[applyProcessing][诊断] nativeSrcUri: ${nativeSrcUri}`);
-  console.log(`[applyProcessing][诊断] 源文件: 存在=${procSrcInfo.exists}, 大小=${(procSrcInfo as any).size ?? 0}`);
+    onProgress(0.03, "HiFi-GAN+ BWE：读取音频…");
+    const b64 = await FileSystemLeg.readAsStringAsync(inputUri, { encoding: "base64" });
+    const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    const parsed = _parseWav(raw);
+    if (!parsed) return false;
+    const { pcm, sr } = parsed;
 
-  // 强制路径转换
-  const rawProcSrc = toFFmpegPath(nativeSrcUri);
-  const rawProcOut = toFFmpegPath(outUri);
-  console.log(`[applyProcessing][路径] rawSrc=${rawProcSrc}`);
-  console.log(`[applyProcessing][路径] rawOut=${rawProcOut}`);
+    // 确认模型文件存在
+    const finfo = await FileSystemLeg.getInfoAsync(modelUri);
+    if (!finfo.exists) { console.warn("[audioEngine] HiFi-GAN+ model not found:", modelUri); return false; }
 
-  const filterStr = filters.length > 0 ? filters.join(",") : "anull";
-  const command = `-i "${rawProcSrc}" -af "${filterStr}" -ar 48000 -sample_fmt s32 -c:a pcm_s24le -y "${rawProcOut}"`;
+    // 升采样到 48kHz（线性，HiFi-GAN 容忍线性插值上采样）
+    const upsampled = _linearResample(pcm, sr, HIFIGAN_OUT_SR);
 
+    // 两端各填充 receptive_field/2 个零
+    const pad    = HIFIGAN_RECEPTIVE_FIELD >> 1;
+    const padded = new Float32Array(upsampled.length + pad * 2);
+    padded.set(upsampled, pad);
+
+    onProgress(0.18, "HiFi-GAN+ BWE：加载模型…");
+    const session = await InferenceSession.create(modelUri, {
+      executionProviders: ["cpu"],
+      graphOptimizationLevel: "all",
+    });
+
+    onProgress(0.30, "HiFi-GAN+ BWE：带宽扩展推理中…");
+    const inputTensor = new Tensor("float32", padded, [1, 1, padded.length]);
+    const result = await session.run({ audio: inputTensor });
+    const wavenetOut = result["wavenet_out"]?.data as Float32Array ?? padded;
+
+    onProgress(0.90, "HiFi-GAN+ BWE：后处理（tanh）…");
+    // tanh + 去掉两端 padding
+    const out = new Float32Array(upsampled.length);
+    for (let i = 0; i < upsampled.length; i++) {
+      out[i] = Math.tanh(wavenetOut[i + pad]);
+    }
+
+    const wavBytes = _encodePcmToWav24(out, HIFIGAN_OUT_SR);
+    const b64Out   = btoa(String.fromCharCode(...Array.from(wavBytes)));
+    await FileSystemLeg.writeAsStringAsync(outputUri, b64Out, { encoding: "base64" });
+
+    onProgress(0.99, "HiFi-GAN+ BWE：完成");
+    console.log("[audioEngine] ✅ HiFi-GAN+ BWE 完成，输出:", out.length, "samples @ 48kHz");
+    return true;
+  } catch (e) {
+    console.error("[audioEngine] HiFi-GAN+ BWE 推理失败:", e);
+    return false;
+  }
+}
+
+// ── NovaSR ONNX 推理（16k → 48k 超分，极轻量） ───────────────────────────────
+/**
+ * NovaSR 推理（229 KB，conv1d/BigVGAN-snake，Apache-2.0）
+ *   输入：audio_16k  float32 [1, 1, T]  — 16kHz 波形
+ *   输出：audio_48k  float32 [1, 1, 3T-4] — 48kHz 波形
+ */
+export async function runNovaSROnnx(
+  inputUri: string,
+  outputUri: string,
+  modelUri: string,
+  onProgress: (p: number, label: string) => void,
+): Promise<boolean> {
   try {
-    await execFFmpegCmd(FFmpegKit, ReturnCode, command, "processing",
-      (p, l) => onProgress(p, l), durationMs, "处理中");
-  } catch (procErr) {
-    console.error("[applyProcessing] 处理失败:", procErr);
-    const fallUri = `${cacheDir}proc_fallback_${Date.now()}.wav`;
-    await FileSystem.copyAsync({ from: nativeSrcUri, to: fallUri });
-    onProgress(1, "已复制原文件（处理失败，保留原始）");
-    return fallUri;
-  }
+    const { InferenceSession, Tensor } = await import("onnxruntime-react-native");
+    const FileSystemLeg = await import("expo-file-system/legacy");
 
-  const stat = await FileSystem.getInfoAsync(outUri);
-  console.log(`[applyProcessing][验证] 输出: 存在=${stat.exists}, 大小=${(stat as any).size ?? 0}`);
-  if (!stat.exists || !(stat as any).size || (stat as any).size === 0) {
-    const fallUri = `${cacheDir}proc_fallback_${Date.now()}.wav`;
-    await FileSystem.copyAsync({ from: nativeSrcUri, to: fallUri });
-    onProgress(1, "已复制原文件（输出为空，保留原始）");
-    return fallUri;
+    onProgress(0.03, "NovaSR：读取音频…");
+    const b64 = await FileSystemLeg.readAsStringAsync(inputUri, { encoding: "base64" });
+    const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    const parsed = _parseWav(raw);
+    if (!parsed) return false;
+    const { pcm, sr } = parsed;
+
+    const finfo = await FileSystemLeg.getInfoAsync(modelUri);
+    if (!finfo.exists) return false;
+
+    const inputPcm = _linearResample(pcm, sr, 16000);
+    onProgress(0.2, "NovaSR：加载模型…");
+    const session = await InferenceSession.create(modelUri, { executionProviders: ["cpu"] });
+
+    onProgress(0.35, "NovaSR：超分推理…");
+    const tensor = new Tensor("float32", inputPcm, [1, 1, inputPcm.length]);
+    const result = await session.run({ audio_16k: tensor });
+    const out48k = result["audio_48k"]?.data as Float32Array ?? inputPcm;
+
+    onProgress(0.92, "NovaSR：写入输出…");
+    const out = new Float32Array(out48k);
+    const wavBytes = _encodePcmToWav24(out, 48000);
+    const b64Out = btoa(String.fromCharCode(...Array.from(wavBytes)));
+    await FileSystemLeg.writeAsStringAsync(outputUri, b64Out, { encoding: "base64" });
+    onProgress(0.99, "NovaSR：完成");
+    return true;
+  } catch (e) {
+    console.error("[audioEngine] NovaSR 推理失败:", e);
+    return false;
   }
-  return outUri;
+}
+
+// ── AudioSR ONNX 推理 ─────────────────────────────────────────────────────────
+/**
+ * @deprecated AudioSR 原版权重 5.9GB，移动端不可用。
+ * 简单模式请用 runGTCRNOnnx，困难模式请用 runGTCRNOnnx + runHiFiGANBWEOnnx。
+ */
+// ── FFmpeg 增强兜底 ───────────────────────────────────────────────────────────
+async function runFFmpegEnhance(
+  inputUri: string,
+  outputUri: string,
+  params: ConvertParams,
+  durationMs: number,
+  startTs: number,
+  onProgress: (p: number, label: string) => void,
+  FFmpegKit: any,
+  ReturnCode: any,
+): Promise<void> {
+  const enhanceFilter = params.enhanceLevel === "advanced"
+    ? [ // 困难模式：超复杂滤镜链
+        "aresample=192000",
+        "highpass=f=60", "lowpass=f=20000",
+        "acompressor=threshold=-30dB:ratio=6:attack=2:release=100",
+        "equalizer=f=100:width_type=h:width=50:g=2",
+        "equalizer=f=2000:width_type=h:width=200:g=3",
+        "equalizer=f=10000:width_type=h:width=1000:g=1",
+        "stereotools=mlev=0.5:mwid=0.7",
+        "afftdn=nr=20:nf=-25:tn=1",
+        "aresample=96000", "aresample=192000", "aresample=96000", "aresample=48000",
+        "loudnorm=I=-16:TP=-1.5:LRA=11",
+        "alimiter=limit=0.95:attack=5:release=50",
+        "aresample=48000",
+      ]
+    : [ // 简单模式：标准母带滤镜链
+        "highpass=f=80",
+        "acompressor=threshold=-20dB:ratio=4:attack=5:release=50",
+        "equalizer=f=2000:width_type=h:width=200:g=3",
+        "equalizer=f=8000:width_type=h:width=1000:g=2",
+        "alimiter=limit=0.95:attack=5:release=50",
+        "aresample=48000", "aresample=96000", "aresample=48000",
+        "loudnorm=I=-16:TP=-1.5:LRA=11",
+      ];
+
+  const command = `-i "${inputUri}" -af "${enhanceFilter.join(",")}" -ar 48000 -sample_fmt s32 -c:a pcm_s24le -y "${outputUri}"`;
+  console.log("[audioEngine] FFmpeg 增强:", command);
+
+  await new Promise<void>((resolve, reject) => {
+    FFmpegKit.executeAsync(
+      command,
+      async (session: any) => {
+        const rc = await session.getReturnCode();
+        if (ReturnCode.isSuccess(rc)) {
+          onProgress(1, "母带增强完成（FFmpeg DSP）");
+          resolve();
+        } else {
+          const logs = await session.getOutput();
+          reject(new Error(`FFmpeg 增强失败: ${logs?.slice(-200) ?? ""}`));
+        }
+      },
+      (log: any) => console.log("[FFmpeg-Enhance]", log.getMessage()),
+      (statistics: any) => {
+        const t = statistics.getTime();
+        const p = Math.min(t / durationMs, 0.97);
+        onProgress(Number(p.toFixed(3)), `FFmpeg DSP · ${Math.round(p * 100)}%`);
+      },
+    );
+  });
 }
 
 // 模拟 Stem 分离进度

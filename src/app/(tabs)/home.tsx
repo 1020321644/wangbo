@@ -501,7 +501,7 @@ export default function HomeScreen() {
                           "font-mono text-[9px] font-bold",
                           isSimpleActive ? "text-primary" : "text-muted-foreground"
                         )}>
-                          {isSimpleActive ? "FFmpeg DSP" : "内置增强"}
+                          {isSimpleActive ? "DeepFilterNet" : "8.6MB"}
                         </Text>
                       </View>
                     </Pressable>
@@ -546,7 +546,7 @@ export default function HomeScreen() {
                           "font-mono text-[9px] font-bold",
                           isAdvancedActive ? "text-primary" : "text-muted-foreground"
                         )}>
-                          {isAdvancedActive ? "DSP Pro" : "强力增强"}
+                          {isAdvancedActive ? "AudioSR" : "≤20MB"}
                         </Text>
                       </View>
                     </Pressable>
@@ -555,19 +555,18 @@ export default function HomeScreen() {
               })()}
             </View>
 
-            {/* 简单模式 确认弹窗 — FFmpeg DSP 降噪 */}
+            {/* 简单模式 确认弹窗 — DeepFilterNet 降噪 */}
             <AlertDialog open={showEnhanceDialog} onOpenChange={setShowEnhanceDialog}>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>启用简单模式（FFmpeg DSP）</AlertDialogTitle>
+                  <AlertDialogTitle>启用简单模式（DeepFilterNet）</AlertDialogTitle>
                   <AlertDialogDescription>
-                    将使用 FFmpeg 内置 DSP 滤镜链进行母带级音频增强：{"\n"}
-                    • 高通滤波（去除 20Hz 以下低频噪声）{"\n"}
-                    • 多段参量 EQ（低频/中频/高频精细调整）{"\n"}
-                    • 动态压缩（提升响度一致性）{"\n"}
-                    • 精密限幅（峰值 -0.3 dBFS）{"\n"}
-                    • EBU R128 响度标准化（-14 LUFS Streaming）{"\n\n"}
-                    处理时间约增加 2-3 倍，无需任何 AI 模型，100% 本地运算。
+                    将调用 DeepFilterNet3 ONNX 模型（约 8.6MB）进行 AI 降噪增强，处理分三步：{"\n"}
+                    1. FFmpeg 预处理 → 48kHz WAV{"\n"}
+                    2. ONNX 分块推理（AI 降噪）{"\n"}
+                    3. FFmpeg 编码 → 目标格式{"\n\n"}
+                    处理时间约增加 3 倍，输出达发行级音质标准。{"\n"}
+                    若未导入 DeepFilterNet 模型，将自动降级为 FFmpeg DSP 内置增强。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -584,19 +583,19 @@ export default function HomeScreen() {
               </AlertDialogContent>
             </AlertDialog>
 
-            {/* 困难模式 确认弹窗 — FFmpeg DSP Pro */}
+            {/* 困难模式 确认弹窗 — AudioSR 超分辨率 */}
             <AlertDialog open={showAdvancedDialog} onOpenChange={setShowAdvancedDialog}>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>启用困难模式（FFmpeg DSP Pro）</AlertDialogTitle>
+                  <AlertDialogTitle>启用困难模式（AudioSR）</AlertDialogTitle>
                   <AlertDialogDescription>
-                    使用更激进的 DSP 参数进行宽带提升与深度母带处理：{"\n"}
-                    • 宽带 EQ（50Hz-16kHz 全频段精细曲线）{"\n"}
-                    • 强力动态压缩（4:1 比例，提升整体密度）{"\n"}
-                    • 精密限幅（峰值 -0.3 dBFS，attack 3ms）{"\n"}
-                    • 严格响度标准化（-14 LUFS，LRA=8）{"\n\n"}
-                    适合老旧/低质音源修复与发行级母带处理。{"\n"}
-                    处理时间约为简单模式的 1.5 倍，同样无需 AI 模型。
+                    将调用 AudioSR 超分辨率 ONNX 模型（约 100MB）进行重度 AI 增强，{"\n"}
+                    重建高频细节与采样率，适合老旧/低质音源修复。处理分三步：{"\n"}
+                    1. FFmpeg 预处理 → 48kHz WAV{"\n"}
+                    2. AudioSR ONNX 分块推理（超分辨率重建）{"\n"}
+                    3. FFmpeg 编码 → 目标格式{"\n\n"}
+                    ⚠️ 首次加载 100MB 模型需 3-8 秒，单次处理耗时约为简单模式的 2-3 倍。{"\n"}
+                    若未导入 AudioSR 模型，将自动降级为 DeepFilterNet 简单模式。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -616,8 +615,7 @@ export default function HomeScreen() {
             <DataRow label="采样率 SR" value={params.sampleRate} valueColor={C.cyan} />
             <DataRow label="位深 BD" value={targetInfo.supportsBitDepth ? params.bitDepth : "—"} valueColor={C.cyan} />
             <DataRow label="码率 BR" value={targetInfo.supportsBitrate ? params.bitrate : "—"} valueColor={C.cyan} />
-            <DataRow label="高质量模式" value={params.highQuality ? "ON · 仅封装不重编码" : "OFF"} valueColor={params.highQuality ? C.cyan : C.muted} />
-            <DataRow label="母带级提升" value={params.masterEnhance ? `ON · ${params.enhanceLevel === "advanced" ? "困难模式 DSP Pro" : "简单模式 FFmpeg DSP"}` : "OFF"} valueColor={params.masterEnhance ? C.orange : C.muted} />
+            <DataRow label="母带级提升" value={params.masterEnhance ? `ON · ${params.enhanceLevel === "advanced" ? "困难模式 AudioSR" : "简单模式 DeepFilterNet"}` : "OFF"} valueColor={params.masterEnhance ? C.orange : C.muted} />
             <DataRow label="动态范围目标" value="DR14+" valueColor={C.cyan} />
             <DataRow label="响度标准" value="-14 LUFS (Streaming)" valueColor={C.cyan} />
             <DataRow label="限幅峰值" value="-0.3 dBFS" valueColor={C.cyan} />
@@ -663,14 +661,14 @@ export default function HomeScreen() {
                 <CheckCircle2 size={32} color={C.cyan} strokeWidth={1.5} />
                 <Text className="font-mono text-sm font-bold text-foreground">转换完成</Text>
                 <Text className="font-mono text-[10px] text-muted-foreground">
-                  {target} · {params.sampleRate}{targetInfo.supportsBitDepth ? ` · ${params.bitDepth}` : ""}{params.masterEnhance ? ` · 母带增强 · ${params.enhanceLevel === "advanced" ? "DSP Pro" : "FFmpeg DSP"}` : ""}
+                  {target} · {params.sampleRate}{targetInfo.supportsBitDepth ? ` · ${params.bitDepth}` : ""}{params.masterEnhance ? ` · 母带增强 · ${engineRef.current === "ffmpeg-dsp" ? "FFmpeg DSP 增强" : "增强"}` : ""}
                 </Text>
                 <View className="w-full flex-row gap-2">
                   <BlueprintButton
-                    label="查看文件"
+                    label="立即播放"
                     icon={<Play size={16} color="#FFFFFF" strokeWidth={2} />}
                     className="flex-1"
-                    onPress={() => router.push("/(tabs)/files" as RelativePathString)}
+                    onPress={() => router.push("/(tabs)/player" as RelativePathString)}
                   />
                   <BlueprintButton
                     label="预览分析"
