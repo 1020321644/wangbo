@@ -1,0 +1,13 @@
+
+-- 添加歌曲元数据字段
+ALTER TABLE audio_files
+  ADD COLUMN IF NOT EXISTS title        TEXT,
+  ADD COLUMN IF NOT EXISTS artist       TEXT,
+  ADD COLUMN IF NOT EXISTS album        TEXT,
+  ADD COLUMN IF NOT EXISTS year         TEXT,
+  ADD COLUMN IF NOT EXISTS genre        TEXT,
+  ADD COLUMN IF NOT EXISTS comment      TEXT,
+  ADD COLUMN IF NOT EXISTS sample_rate  TEXT,
+  ADD COLUMN IF NOT EXISTS bit_depth    TEXT,
+  ADD COLUMN IF NOT EXISTS bitrate      TEXT,
+  ADD COLUMN IF NOT EXISTS master_enhance BOOLEAN DEFAULT FALSE;

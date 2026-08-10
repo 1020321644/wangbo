@@ -1,0 +1,97 @@
+# GitHub Actions: Android APK 构建（含 ffmpeg-kit-next + onnxruntime 原生模块）
+#
+# 说明：
+#   - ffmpeg-kit-react-native 已替换为内置预编译 AAR 的 richkuo7 版本（vendor/），
+#     无需从 Maven Central 拉取已下架的 com.arthenica artifact。
+#   - onnxruntime-react-native 为 TurboModule，需 New Architecture（已在 app.json 开启）。
+#   - 构建流程：pnpm install → expo prebuild → gradle assembleRelease → 上传 APK。
+#   - 使用 debug keystore 签名（仅用于内部测试）。
+
+name: Build Android APK
+
+on:
+  # 手动触发
+  workflow_dispatch:
+  # push 到 master 分支时自动触发
+  push:
+    branches: [master]
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: 获取 pnpm 缓存目录
+        id: pnpm-cache-dir
+        run: echo "dir=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: pnpm 缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache-dir.outputs.dir }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: 设置 Java (JDK 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: 设置 Android SDK（含 NDK 27 和 CMake）
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-36 build-tools;36.0.0 ndk;27.1.12297006 cmake;3.22.1"
+
+      - name: 安装依赖
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Lint 校验
+        run: npm run lint
+
+      - name: Expo prebuild（生成 Android 原生工程）
+        run: npx expo prebuild --platform android --no-install --clean
+
+      - name: 修复 onnxruntime VersionNumber 兼容性（Gradle 9 已移除此 API）
+        run: |
+          find . -path "*/onnxruntime-react-native*/android/build.gradle" \
+            -exec sed -i 's/if (VersionNumber\.parse(REACT_NATIVE_VERSION) < VersionNumber\.parse("0\.71"))/if (false)/' {} \;
+          echo "patch applied"
+
+      - name: Gradle 缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: 构建 Release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: 上传 APK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-converter-pro-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
