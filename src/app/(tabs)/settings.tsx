@@ -335,7 +335,7 @@ export default function SettingsScreen() {
                     AI 模型管理
                   </Text>
                   <Text style={{ fontFamily: "monospace", fontSize: 8, color: C.muted }}>
-                    导入 / 删除本地 .onnx 模型
+                    内置默认模型 · 已锁定
                   </Text>
                 </View>
               </View>
@@ -395,7 +395,7 @@ export default function SettingsScreen() {
           <View style={{ padding: 16, gap: 10 }}>
             {/* 标题说明 */}
             <Text style={{ fontFamily: "monospace", fontSize: 9, color: C.muted, lineHeight: 14 }}>
-              所有 AI 模型在本地设备运行，无需联网，支持热插拔替换（在 AI 模型管理页导入 .onnx 文件）。
+              所有 AI 模型在本地设备运行，无需联网，使用内置默认模型在应用启动时一次性加载。
             </Text>
 
             {/* 模型列表 */}

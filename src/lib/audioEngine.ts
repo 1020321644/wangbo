@@ -349,10 +349,10 @@ export async function runConvert(
     // 困难模式：GTCRN 降噪 → HiFi-GAN+ BWE 带宽扩展（输出 48kHz）
     if (level === "advanced") {
       try {
-        const { useModelStore } = await import("@/store/modelStore");
-        const { resolvModelUri } = await import("@/lib/modelBootstrap");
-        const gtcrnUri = resolvModelUri("gtcrn",     useModelStore.getState().getModelUri("gtcrn"));
-        const bweUri   = resolvModelUri("hifiganbwe", useModelStore.getState().getModelUri("hifiganbwe"));
+        // [热插拔已禁用] 固定使用内置默认模型，不再读取 modelStore / 动态导入
+        const { BUNDLED_MODEL_URIS } = await import("@/lib/modelBootstrap");
+        const gtcrnUri = BUNDLED_MODEL_URIS.gtcrn;
+        const bweUri   = BUNDLED_MODEL_URIS.hifiganbwe;
         if (gtcrnUri) {
           const tempUri = `${cacheDir}gtcrn_tmp_${Date.now()}.wav`;
           onEngine?.("deepfilternet");
@@ -380,9 +380,9 @@ export async function runConvert(
     if (level === "simple" || level === "advanced") {
       // 简单模式 / 困难模式降级：GTCRN 降噪
       try {
-        const { useModelStore } = await import("@/store/modelStore");
-        const { resolvModelUri } = await import("@/lib/modelBootstrap");
-        const gtcrnUri = resolvModelUri("gtcrn", useModelStore.getState().getModelUri("gtcrn"));
+        // [热插拔已禁用] 固定使用内置默认模型
+        const { BUNDLED_MODEL_URIS } = await import("@/lib/modelBootstrap");
+        const gtcrnUri = BUNDLED_MODEL_URIS.gtcrn;
         if (gtcrnUri) {
           onEngine?.("deepfilternet");
           onProgress(0.02, "加载 GTCRN 降噪模型...");
