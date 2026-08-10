@@ -26,7 +26,7 @@ import {
 import { useColors } from "@/lib/theme";
 import { cn, formatFileSize } from "@/lib/utils";
 import { STEM_TRACKS, type StemKey, detectFormat } from "@/lib/formats";
-import { estimateOutputSize } from "@/lib/audioEngine";
+import { estimateOutputSize, toFFmpegPath } from "@/lib/audioEngine";
 import { startTask, endTask } from "@/lib/taskGuard";
 import { useFileStore, type AudioFile } from "@/store/fileStore";
 import { useHistoryStore } from "@/store/historyStore";
@@ -231,6 +231,7 @@ export default function StemScreen() {
   const [progress, setProgress] = useState(0);
   const [results, setResults] = useState<StemResult[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [sepStrength, setSepStrength] = useState(70); // 分离强度 0-100，70 为默认均衡值
   const [saveAll, setSaveAll] = useState(false);
 
   const pickFile = useCallback(async () => {
@@ -294,14 +295,27 @@ export default function StemScreen() {
 
       // toFFmpegPath 已移除：file:// URI 直接传入，HarmonyOS FFmpegKit 正常识别（与初始版本一致）
 
-      // 每个音轨的 FFmpeg 滤镜（频率域分离）
-      // 人声：中心声道提取 (L+R)/2；伴奏：侧声道残差 (L-R)；其余为 EQ 截取
+      // 每个音轨的 FFmpeg 滤镜（频率域分离 + 增益补偿）
+      // 人声：中心声道 (L+R)/2 + 中频增强 + 增益补偿
+      // 伴奏：侧声道残差 (L-R) + 低频增强 + 增益补偿
+      // 分离强度：通过 wet/dry amix 控制（0=原声, 100=完全分离）
+      const gainVocal = (0.8 + (sepStrength / 100) * 0.8).toFixed(2);       // 0.8 ~ 1.6
+      const gainInstr = (0.9 + (sepStrength / 100) * 1.1).toFixed(2);       // 0.9 ~ 2.0
+      const gainDrums = (1.2 + (sepStrength / 100) * 0.8).toFixed(2);       // 1.2 ~ 2.0
+      const gainBass  = (1.0 + (sepStrength / 100) * 0.8).toFixed(2);       // 1.0 ~ 1.8
+      const gainOther = (0.8 + (sepStrength / 100) * 0.5).toFixed(2);       // 0.8 ~ 1.3
+
       const STEM_FILTER: Record<StemKey, string> = {
-        vocal:         "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1",
-        instrumental:  "pan=stereo|c0=c0-c1|c1=c1-c0",
-        drums:         "bandpass=f=150:width_type=h:width=280,volume=2.0",
-        bass:          "lowpass=f=200,volume=1.8",
-        other:         "highpass=f=2000,volume=1.2",
+        // 人声：中心声道 + 中频人声区增强 + 去低频噪声
+        vocal: `pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,highpass=f=180,equalizer=f=1200:width_type=o:width=2:g=3,equalizer=f=3000:width_type=o:width=2:g=2,volume=${gainVocal}`,
+        // 伴奏：侧声道残差消人声 + 低频/高频乐器增强
+        instrumental: `pan=stereo|c0=c0-c1|c1=c1-c0,equalizer=f=200:width_type=o:width=2:g=3,equalizer=f=6000:width_type=o:width=2:g=1.5,volume=${gainInstr}`,
+        // 鼓：低频冲击 + 增益
+        drums: `bandpass=f=150:width_type=h:width=280,volume=${gainDrums}`,
+        // 低音：次低频 + 增益
+        bass: `lowpass=f=200,volume=${gainBass}`,
+        // 其他：高频 + 增益
+        other: `highpass=f=2000,volume=${gainOther}`,
       };
 
       const out: StemResult[] = [];
@@ -315,24 +329,49 @@ export default function StemScreen() {
         const progress_end   = 0.05 + ((i + 1) / selected.length) * 0.85;
         setProgress(progress_start);
 
-        // FFmpeg 命令：中心/侧声道分离（立体声输入）
-        // 单声道输入时 pan 滤镜会报错，用 aecho 替代
-        // file:// URI 直接传入 — 与初始版本保持一致，HarmonyOS FFmpegKit 正常识别
-        const cmd = `-y -i "${resolvedSrcUri}" -af "${filter}" -ar 48000 -acodec pcm_s24le "${outUri}"`;
+        // ── 路径转换 + 完整命令日志 ──────────────────────────────────────
+        const rawSrcStem = toFFmpegPath(resolvedSrcUri);
+        const rawOutStem = toFFmpegPath(outUri);
+        console.log(`\n[stem][${k}] ▶ 分离音轨`);
+        console.log(`[stem][${k}] rawSrc=${rawSrcStem}`);
+        console.log(`[stem][${k}] rawOut=${rawOutStem}`);
+        console.log(`[stem][${k}] filter=${filter}`);
+        console.log(`[stem][${k}] sepStrength=${sepStrength}%`);
+
+        // FFmpeg 命令：wet/dry mix 控制分离强度（100=完全分离, <100=混入原声）
+        let cmd: string;
+        if (sepStrength >= 100) {
+          // 完全分离：纯滤镜输出
+          cmd = `-y -i "${rawSrcStem}" -af "${filter}" -ar 48000 -acodec pcm_s24le "${rawOutStem}"`;
+        } else {
+          // 干湿混合：amix(dry, wet) 按强度配比
+          const wetW = (sepStrength / 100).toFixed(2);
+          const dryW = ((100 - sepStrength) / 100).toFixed(2);
+          cmd = `-y -i "${rawSrcStem}" -filter_complex "[0:a]asplit=2[dry][wet];[wet]${filter}[proc];[dry][proc]amix=inputs=2:weights=${dryW},${wetW}:normalize=0" -ar 48000 -acodec pcm_s24le "${rawOutStem}"`;
+        }
+        console.log(`[stem][${k}] CMD: ${cmd}`);
+
         const session = await FFmpegKit.execute(cmd);
         const rc = await session.getReturnCode();
+        const rcVal: number = typeof rc?.getValue === "function" ? rc.getValue() : Number(rc);
+        console.log(`[stem][${k}] RC=${rcVal}`);
 
         if (!ReturnCode.isSuccess(rc)) {
-          // 单声道降级：直接带 EQ 输出
+          // 单声道降级：去掉 pan 滤镜，改用宽频 EQ
           const fallbackFilter: Record<StemKey, string> = {
-            vocal:        "highpass=f=300,lowpass=f=3500",
-            instrumental: "bandreject=f=1000:width_type=h:width=1400",
-            drums:        "lowpass=f=300,volume=2.0",
-            bass:         "lowpass=f=200,volume=1.8",
-            other:        "highpass=f=2000,volume=1.2",
+            vocal:        `highpass=f=300,lowpass=f=3500,volume=${gainVocal}`,
+            instrumental: `bandreject=f=1000:width_type=h:width=1400,volume=${gainInstr}`,
+            drums:        `lowpass=f=300,volume=${gainDrums}`,
+            bass:         `lowpass=f=200,volume=${gainBass}`,
+            other:        `highpass=f=2000,volume=${gainOther}`,
           };
-          const fbCmd = `-y -i "${resolvedSrcUri}" -af "${fallbackFilter[k]}" -ar 48000 -acodec pcm_s24le "${outUri}"`;
-          await FFmpegKit.execute(fbCmd);
+          const fbFilter = fallbackFilter[k];
+          const fbCmd = `-y -i "${rawSrcStem}" -af "${fbFilter}" -ar 48000 -acodec pcm_s24le "${rawOutStem}"`;
+          console.log(`[stem][${k}] 降级命令: ${fbCmd}`);
+          const fbSession = await FFmpegKit.execute(fbCmd);
+          const fbRc = await fbSession.getReturnCode();
+          const fbRcVal: number = typeof fbRc?.getValue === "function" ? fbRc.getValue() : Number(fbRc);
+          console.log(`[stem][${k}] 降级 RC=${fbRcVal}`);
         }
 
         setProgress(progress_end);
@@ -360,7 +399,7 @@ export default function StemScreen() {
       await endTask();
       setRunning(false);
     }
-  }, [source, selected, addHistory]);
+  }, [source, selected, sepStrength, addHistory]);
 
   const saveTrack = useCallback((r: StemResult) => {
     if (!source) return;
@@ -479,14 +518,56 @@ export default function StemScreen() {
           </View>
         </Panel>
 
+        {/* 03 分离强度 */}
+        {(() => {
+          const STRENGTH_PRESETS = [
+            { val: 30,  label: "30%", desc: "轻柔" },
+            { val: 50,  label: "50%", desc: "均衡" },
+            { val: 70,  label: "70%", desc: "标准" },
+            { val: 85,  label: "85%", desc: "深度" },
+            { val: 100, label: "100%", desc: "最强" },
+          ];
+          return (
+            <Panel title="03 · 分离强度 SEPARATION STRENGTH">
+              <View className="p-3 gap-2">
+                <Text className="font-mono text-[10px] text-muted-foreground leading-relaxed">
+                  强度越高分离越干净，但人声残留也会被削减；低强度保留更多自然感。
+                </Text>
+                <View className="flex-row gap-2 mt-1">
+                  {STRENGTH_PRESETS.map(({ val, label, desc }) => {
+                    const active = sepStrength === val;
+                    return (
+                      <Pressable
+                        key={val}
+                        onPress={() => setSepStrength(val)}
+                        className={[
+                          "flex-1 items-center justify-center py-2 border active:opacity-70",
+                          active ? "border-primary bg-primary/15" : "border-border",
+                        ].join(" ")}
+                      >
+                        <Text className={["font-mono text-[11px] font-bold", active ? "text-primary" : "text-muted-foreground"].join(" ")}>
+                          {label}
+                        </Text>
+                        <Text className={["font-mono text-[9px]", active ? "text-primary/70" : "text-muted-foreground/60"].join(" ")}>
+                          {desc}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            </Panel>
+          );
+        })()}
+
         {error ? (
           <View className="border border-destructive bg-card p-3">
             <Text className="font-mono text-xs text-destructive">{error}</Text>
           </View>
         ) : null}
 
-        {/* 03 执行 */}
-        <Panel title="03 · 执行 EXECUTE">
+        {/* 04 执行 */}
+        <Panel title="04 · 执行 EXECUTE">
           {running ? (
             <View className="gap-3 p-4">
               <View className="flex-row items-center justify-between">
