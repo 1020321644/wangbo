@@ -12,7 +12,19 @@
 
 import { useState, useCallback } from "react";
 import type { AudioFile } from "@/store/fileStore";
-import type { RecordMasterParams, RecordMode, RecordOutputFormat } from "./useMasterRecord";
+// 极简版：内联类型，不依赖 useMasterRecord（已移除录制功能）
+export type RecordOutputFormat = "WAV" | "DSD64" | "DSD128" | "DSD256";
+export type RecordMode = "system" | "microphone";
+export interface RecordMasterParams {
+  sampleRate: "44.1kHz" | "48kHz" | "88.2kHz" | "96kHz" | "192kHz";
+  bitDepth: "16bit" | "24bit" | "32bit";
+  hpfFreq: 20 | 30 | 40 | 80;
+  comp1Ratio: 2 | 3 | 4 | 6;
+  comp2Ratio: 1.5 | 2 | 3;
+  gain: 1.0 | 1.1 | 1.2 | 1.3 | 1.5 | 2.0;
+  limitLevel: -0.3 | -0.5 | -1.0 | -1.5 | -2.0 | -3.0;
+  masterEnhance: boolean;
+}
 import { logger } from "@/store/logStore";
 
 /** 专业响度标准（EBU R128 / ITU-R BS.1770-4） */

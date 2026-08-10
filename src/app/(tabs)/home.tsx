@@ -666,10 +666,10 @@ export default function HomeScreen() {
                 </Text>
                 <View className="w-full flex-row gap-2">
                   <BlueprintButton
-                    label="立即播放"
+                    label="查看文件"
                     icon={<Play size={16} color="#FFFFFF" strokeWidth={2} />}
                     className="flex-1"
-                    onPress={() => router.push("/(tabs)/player" as RelativePathString)}
+                    onPress={() => router.push("/(tabs)/files" as RelativePathString)}
                   />
                   <BlueprintButton
                     label="预览分析"

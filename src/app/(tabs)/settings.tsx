@@ -135,7 +135,6 @@ export default function SettingsScreen() {
   const [privacyPressed,   setPrivacyPressed]   = useState(false);
   const [agreementPressed, setAgreementPressed] = useState(false);
   const [legalPressed,     setLegalPressed]     = useState(false);
-  const [modelPressed,    setModelPressed]    = useState(false);
   const [changelogOpen,    setChangelogOpen]    = useState(true);  // 默认展开最新
 
   const [exportMsg,   setExportMsg]   = useState<string | null>(null);
@@ -315,32 +314,6 @@ export default function SettingsScreen() {
                 </View>
               </View>
             </View>
-
-            {/* AI 模型管理入口 */}
-            <Pressable
-              onPress={() => router.push("/model-import" as RelativePathString)}
-              onPressIn={() => setModelPressed(true)}
-              onPressOut={() => setModelPressed(false)}
-              style={{
-                flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-                borderWidth: 1, borderColor: C.orange,
-                backgroundColor: modelPressed ? `${C.orange}20` : `${C.orange}10`,
-                paddingHorizontal: 12, paddingVertical: 10,
-              }}
-            >
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <Cpu size={16} color={C.orange} />
-                <View>
-                  <Text style={{ fontFamily: "monospace", fontSize: 10, fontWeight: "bold", color: C.text }}>
-                    AI 模型管理
-                  </Text>
-                  <Text style={{ fontFamily: "monospace", fontSize: 8, color: C.muted }}>
-                    内置默认模型 · 已锁定
-                  </Text>
-                </View>
-              </View>
-              <ChevronRight size={16} color={C.orange} />
-            </Pressable>
 
             {/* 功能简介 */}
             <View style={{ borderTopWidth: 1, borderTopColor: C.border, paddingTop: 12, gap: 6 }}>

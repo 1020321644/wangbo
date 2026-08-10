@@ -37,7 +37,7 @@ export default function ParamsScreen() {
       >
         {/* AI 评级快捷入口 */}
         <Pressable
-          onPress={() => router.push("/audio-rating" as RelativePathString)}
+          onPress={() => router.push("/analysis" as RelativePathString)}
           className="flex-row items-center gap-3 border border-primary bg-primary/10 p-4 active:opacity-70"
         >
           <View className="h-10 w-10 items-center justify-center border border-primary bg-primary/20">
