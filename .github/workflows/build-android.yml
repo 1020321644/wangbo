@@ -64,6 +64,25 @@ jobs:
       - name: 安装依赖
         run: pnpm install --no-frozen-lockfile
 
+      - name: 下载 ADB arm64 二进制（用于系统内录一键授权）
+        run: |
+          mkdir -p plugins/android-audio-capture/assets
+          # 下载 arm64-v8a adb（来自 Termux bootstrap 官方发布）
+          ADB_URL="https://github.com/termux/termux-packages/releases/download/bootstrap-2024.05.24/adb-arm64-v8a"
+          if wget -q --timeout=30 "$ADB_URL" -O plugins/android-audio-capture/assets/adb; then
+            chmod +x plugins/android-audio-capture/assets/adb
+            echo "✅ adb binary downloaded ($(wc -c < plugins/android-audio-capture/assets/adb) bytes)"
+          else
+            # fallback：尝试从 Android Platform Tools 提取 host adb（仅作占位，实际运行需 arm64 版）
+            echo "⚠️ Primary source failed, trying platform-tools fallback..."
+            wget -q "https://dl.google.com/android/repository/platform-tools-latest-linux.zip" -O /tmp/pt.zip && \
+              unzip -q /tmp/pt.zip platform-tools/adb -d /tmp && \
+              cp /tmp/platform-tools/adb plugins/android-audio-capture/assets/adb && \
+              chmod +x plugins/android-audio-capture/assets/adb && \
+              echo "✅ fallback adb copied" || \
+              echo "⚠️ adb binary unavailable — 一键授权将降级为复制命令模式"
+          fi
+
       - name: Lint 校验
         run: npm run lint
 
