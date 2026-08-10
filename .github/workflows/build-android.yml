@@ -21,6 +21,8 @@ jobs:
     name: Build Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write   # 允许创建 GitHub Release 和上传 APK 附件
 
     steps:
       - name: 检出代码
