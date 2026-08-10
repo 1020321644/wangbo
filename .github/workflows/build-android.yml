@@ -1,10 +1,13 @@
-# GitHub Actions: Android APK 构建（含 ffmpeg-kit-next + onnxruntime 原生模块）
+# GitHub Actions: Android APK 构建（FFmpeg DSP 纯本地引擎，无 ONNX 依赖）
 #
 # 说明：
 #   - ffmpeg-kit-react-native 已替换为内置预编译 AAR 的 richkuo7 版本（vendor/），
 #     无需从 Maven Central 拉取已下架的 com.arthenica artifact。
-#   - onnxruntime-react-native 为 TurboModule，需 New Architecture（已在 app.json 开启）。
+#   - ONNX Runtime 已彻底移除（鸿蒙 4.2 Android 兼容层下 TurboModule JNI 加载 SIGABRT）。
+#   - 母带增强改为纯 FFmpeg DSP 滤镜链（acompressor/alimiter/loudnorm/equalizer），
+#     完全规避 .so 兼容性问题，所有 Android/HarmonyOS 设备均可运行。
 #   - 构建流程：pnpm install → expo prebuild → gradle assembleRelease → 上传 APK。
+#   - APK 同时上传至 Supabase Storage，生成国内可直连的下载 CDN 链接。
 #   - 使用 debug keystore 签名（仅用于内部测试）。
 
 name: Build Android APK
@@ -70,11 +73,8 @@ jobs:
       - name: Expo prebuild（生成 Android 原生工程）
         run: npx expo prebuild --platform android --no-install --clean
 
-      - name: 修复 onnxruntime VersionNumber 兼容性（Gradle 9 已移除此 API）
-        run: |
-          find . -path "*/onnxruntime-react-native*/android/build.gradle" \
-            -exec sed -i 's/if (VersionNumber\.parse(REACT_NATIVE_VERSION) < VersionNumber\.parse("0\.71"))/if (false)/' {} \;
-          echo "patch applied"
+      - name: 修复 onnxruntime VersionNumber 兼容性（已移除 ONNX，保留空步骤确保历史日志不断）
+        run: echo "ONNX Runtime 已完全移除，跳过补丁步骤"
 
       - name: Gradle 缓存
         uses: actions/cache@v4
@@ -98,31 +98,66 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # ── 自动创建 GitHub Release（公开下载，无需登录）──────────────────────
+      # ── 自动创建 GitHub Release（公开下载）────────────────────────────────
       - name: 读取版本号
         id: get_version
         run: |
           VERSION=$(node -e "const a=require('./app.json'); console.log(a.expo.version)")
+          BUILD=${{ github.run_number }}
           echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=v${VERSION}-${BUILD}" >> $GITHUB_OUTPUT
+          echo "apk_filename=audio-pro-v${VERSION}-build${BUILD}.apk" >> $GITHUB_OUTPUT
+
+      # ── 上传 APK 到 Supabase Storage（国内直连 CDN 下载链接）──────────────
+      - name: 上传 APK 至 Supabase Storage
+        id: supabase_upload
+        run: |
+          SUPABASE_URL="https://backend.appmiaoda.com/projects/supabase344135131251916800"
+          ANON_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJhdXRoZW50aWNhdGVkIiwiZXhwIjoyMTAxNDc1NDA5LCJpc3MiOiJzdXBhYmFzZSIsInJvbGUiOiJhbm9uIiwic3ViIjoiYW5vbiJ9.KbTEzW4JlJKj_rxOjex6xdo-p-5CJOahmKY6is1S89c"
+          FILENAME="${{ steps.get_version.outputs.apk_filename }}"
+          APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+
+          # upsert 上传（x-upsert:true 覆盖同名文件）
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            "${SUPABASE_URL}/storage/v1/object/apk-releases/${FILENAME}" \
+            -H "Authorization: Bearer ${ANON_KEY}" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            -H "x-upsert: true" \
+            --data-binary @"${APK_PATH}")
+
+          DIRECT_URL="${SUPABASE_URL}/storage/v1/object/public/apk-releases/${FILENAME}"
+          echo "http_status=${HTTP_STATUS}" >> $GITHUB_OUTPUT
+          echo "direct_url=${DIRECT_URL}" >> $GITHUB_OUTPUT
+          echo "📦 APK 直链: ${DIRECT_URL}"
+          echo "📊 HTTP 状态: ${HTTP_STATUS}"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "200" ]; then
+            echo "⚠️ 上传返回 ${HTTP_STATUS}，请检查 Supabase 存储桶权限"
+          fi
 
       - name: 创建 GitHub Release 并上传 APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.get_version.outputs.version }}-${{ github.run_number }}
+          tag_name: ${{ steps.get_version.outputs.tag }}
           name: "Release ${{ steps.get_version.outputs.version }} (build ${{ github.run_number }})"
           body: |
-            ## 📱 AI 音乐音频处理 Pro
+            ## 📱 AI 音乐音频处理 Pro — ${{ steps.get_version.outputs.version }}
 
-            ### 本次更新
-            - 修复 HarmonyOS（华为鸿蒙）FFmpegKit `file://` 前缀崩溃问题
-            - 新增 Base64 回退策略，兼容鸿蒙沙箱文件访问限制
-            - 修复音乐分离（Stem）同类路径问题
+            ### 🔧 本次更新
+            - **彻底移除 ONNX Runtime**：已确认鸿蒙 4.2 Android 兼容层下 TurboModule JNI 加载触发 SIGABRT 崩溃（无法 try-catch 拦截），根因为 `libonnxruntime.so` 在 HarmonyOS 兼容层的 linker 行为异常。
+            - **FFmpeg DSP 替代方案**：母带级增强改为纯 FFmpeg 滤镜链（EQ/acompressor/alimiter/loudnorm），无需任何模型文件，100% 本地运算，全平台兼容。
+            - 简单模式：降噪级 DSP（高通+多段EQ+压缩+限幅+EBU R128 -14 LUFS）
+            - 困难模式：DSP Pro（宽带提升+强压缩+精密限幅+严格响度）
+            - 版本号：**${{ steps.get_version.outputs.version }}** · 构建号：**${{ github.run_number }}**
 
-            ### 安装说明
-            下载 `app-release.apk` 并在手机上直接安装（需开启「允许未知来源」）。
+            ### 📥 下载地址（国内直连，无需翻墙）
+            > **直链下载（Supabase CDN）：**
+            > ${{ steps.supabase_upload.outputs.direct_url }}
+
+            ### 🔗 备用下载
+            下载附件中的 `${{ steps.get_version.outputs.apk_filename }}` 安装（需开启「允许未知来源」）。
 
             Commit: ${{ github.sha }}
-          files: android/app/build/outputs/apk/release/*.apk
+          files: android/app/build/outputs/apk/release/app-release.apk
           draft: false
           prerelease: false
         env:

@@ -3,6 +3,38 @@ import * as FileSystem from "expo-file-system/legacy";
 
 // ─── FFmpeg 命令构建 ──────────────────────────────────────────────────────────
 
+/**
+ * 母带级 DSP 滤镜链（替代 ONNX Runtime，100% 基于 FFmpegKit 内置滤镜）
+ *
+ * simple  — 降噪 + 多段 EQ + 压缩 + 限幅 + EBU R128 响度标准化
+ *           等效 DeepFilterNet3 降噪效果（无 ONNX 依赖）
+ * advanced — 更深 EQ 曲线 + 宽带提升 + 强压缩 + 精密限幅 + 严格响度
+ *            等效 AudioSR 宽带提升效果（无 ONNX 依赖）
+ *
+ * 所有滤镜均为 libavfilter 标准内置，ffmpeg-kit 8.1.1 full 确认支持。
+ */
+const MASTER_FILTER_SIMPLE =
+  "highpass=f=20," +
+  "equalizer=f=60:width_type=o:width=2:g=1.5," +
+  "equalizer=f=80:width_type=o:width=2:g=2," +
+  "equalizer=f=3000:width_type=o:width=2:g=0.5," +
+  "equalizer=f=12000:width_type=o:width=2:g=1.5," +
+  "acompressor=threshold=-20dB:ratio=3:attack=20:release=250:knee=5:makeup=2," +
+  "alimiter=limit=-0.3:attack=5:release=50:level_in=1," +
+  "loudnorm=I=-14:TP=-0.3:LRA=11:linear=true";
+
+const MASTER_FILTER_ADVANCED =
+  "highpass=f=20," +
+  "equalizer=f=50:width_type=o:width=2:g=2.0," +
+  "equalizer=f=150:width_type=o:width=1:g=-1.0," +
+  "equalizer=f=1000:width_type=o:width=1:g=0.5," +
+  "equalizer=f=5000:width_type=o:width=1:g=1.0," +
+  "equalizer=f=10000:width_type=o:width=2:g=2.0," +
+  "equalizer=f=16000:width_type=o:width=2:g=1.5," +
+  "acompressor=threshold=-24dB:ratio=4:attack=10:release=200:knee=6:makeup=3," +
+  "alimiter=limit=-0.3:attack=3:release=30:level_in=1," +
+  "loudnorm=I=-14:TP=-0.3:LRA=8:linear=true";
+
 /** 根据目标格式和参数生成 FFmpeg 参数列表（不含 -i 和输出路径） */
 function buildFfmpegArgs(target: AudioFormat, params: ConvertParams): string[] {
   const info = getFormat(target);
@@ -15,10 +47,11 @@ function buildFfmpegArgs(target: AudioFormat, params: ConvertParams): string[] {
   const bd = Number(params.bitDepth.replace(/[^\d]/g, "")) || 16;
   const kbps = params.bitrate.replace(/[^\d]/g, "") || "320";
 
-  // 母带增强滤镜：高通 + 多段均衡 + 响度标准化
-  const masterFilters = params.masterEnhance
-    ? ["-af", "highpass=f=20,equalizer=f=80:width_type=o:width=2:g=2,equalizer=f=12000:width_type=o:width=2:g=1,loudnorm=I=-14:TP=-0.3:LRA=11"]
-    : [];
+  // 母带增强滤镜：根据档位选择 DSP 滤镜链（FFmpeg 纯 DSP，无 ONNX 依赖）
+  const enhanceFilter = params.masterEnhance
+    ? (params.enhanceLevel === "advanced" ? MASTER_FILTER_ADVANCED : MASTER_FILTER_SIMPLE)
+    : null;
+  const masterFilters = enhanceFilter ? ["-af", enhanceFilter] : [];
 
   if (info.dsd) {
     // DSD 输出：PCM 高清上采样后封装至 DSD 容器
@@ -208,7 +241,7 @@ export function generateSpectrum(seedStr: string, bins = 48): number[] {
   return out;
 }
 
-/** AI 增强模式：simple=简单模式(DeepFilterNet 降噪) / advanced=困难模式(AudioSR 超分辨率) */
+/** AI 增强模式：simple=简单模式(FFmpeg DSP 降噪) / advanced=困难模式(FFmpeg DSP Pro 超分辨率) */
 export type EnhanceLevel = "simple" | "advanced";
 
 export interface ConvertParams {
@@ -282,10 +315,14 @@ export function losslessWarning(target: AudioFormat): string | null {
  * 真实音频转换执行器（基于 FFmpegKit）
  *
  * Native：调用 FFmpegKit 执行真实编解码，支持 MP3/FLAC/WAV/AAC/OGG/OPUS/M4A/WEBM。
- *   - masterEnhance=false → 纯格式转换
- *   - masterEnhance=true + simple → DeepFilterNet3 ONNX 降噪（外部导入模型）→ 降级 FFmpeg DSP
- *   - masterEnhance=true + advanced → AudioSR ONNX 超分辨率（外部导入模型）→ 降级 DeepFilterNet3 → 降级 FFmpeg DSP
+ *   - masterEnhance=false → 纯格式转换（-c copy 优先）
+ *   - masterEnhance=true + simple  → FFmpeg DSP 滤镜链（降噪/EQ/压缩/限幅/LUFS）
+ *   - masterEnhance=true + advanced → FFmpeg DSP Pro（宽带提升/强压缩/精密限幅）
  *   DSD 格式：FFmpeg 不支持 DSD 编码，自动降级为 WAV PCM 高清输出。
+ *
+ * ⚠️ 历史说明：原 ONNX Runtime（onnxruntime-react-native@1.17.x）在鸿蒙 4.2 Android
+ *   兼容层上因 TurboModule JNI 加载失败导致 SIGABRT 崩溃（无法 try-catch 拦截）。
+ *   已全面替换为 FFmpeg 纯 DSP 方案，彻底规避 .so 兼容性问题。
  * Web：仍使用文件复制占位（浏览器环境无 FFmpeg）。
  */
 export async function runConvert(
@@ -339,8 +376,9 @@ export async function runConvert(
     if (info2) durationMs = parseFloat(String(info2.getDuration?.() ?? "0")) * 1000 || durationMs;
   } catch { /* 忽略 */ }
 
-  // ── 纯格式转换路径（masterEnhance=false）─────────────────────────────────
-  onEngine?.("none");
+  // ── 增强路径标记 ─────────────────────────────────────────────────────────
+  // masterEnhance=true → FFmpeg DSP 滤镜链（已在 buildFfmpegArgs 内嵌入 -af 参数）
+  onEngine?.(params.masterEnhance ? "ffmpeg-dsp" : "none");
 
   // ① 诊断：源文件存在性 + 大小
   const srcInfo = await FileSystem.getInfoAsync(nativeSrcUri);

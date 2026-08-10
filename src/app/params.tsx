@@ -131,12 +131,12 @@ export default function ParamsScreen() {
             pointerEvents={params.masterEnhance ? "auto" : "none"}
           >
             <Chip
-              label="简单模式 · DeepFilterNet 8.6MB"
+              label="简单模式 · FFmpeg DSP"
               active={params.enhanceLevel === "simple"}
               onPress={() => params.setEnhanceLevel("simple")}
             />
             <Chip
-              label="困难模式 · AudioSR ≤20MB"
+              label="困难模式 · DSP Pro"
               active={params.enhanceLevel === "advanced"}
               onPress={() => params.setEnhanceLevel("advanced")}
             />
