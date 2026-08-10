@@ -269,14 +269,31 @@ export default function StemScreen() {
       const base = source.name.replace(/\.[^.]+$/, "");
       const ts = Date.now();
 
-      // ⚠️ content:// → file:// 缓存（防止 FFmpegKit 在 Android 崩溃）
+      // ⚠️ content:// → file:// 缓存（双重策略：copyAsync + Base64 回退，兼容 HarmonyOS）
       let resolvedSrcUri = source.uri;
       if (source.uri.startsWith("content://")) {
         const srcExt = source.name.split(".").pop()?.toLowerCase() ?? "audio";
         const dest = `${cacheDir}input_${ts}.${srcExt}`;
-        await FileSystem.copyAsync({ from: source.uri, to: dest });
-        resolvedSrcUri = dest;
+        // 策略1: copyAsync
+        try {
+          await FileSystem.copyAsync({ from: source.uri, to: dest });
+          const info = await FileSystem.getInfoAsync(dest);
+          if (info.exists && (info as any).size > 0) {
+            resolvedSrcUri = dest;
+          } else {
+            throw new Error("copyAsync 结果为空");
+          }
+        } catch (e1) {
+          console.warn("[stem] copyAsync 失败，尝试 Base64 回退 (HarmonyOS):", e1);
+          // 策略2: Base64 读写
+          const b64 = await FileSystem.readAsStringAsync(source.uri, { encoding: FileSystem.EncodingType.Base64 });
+          await FileSystem.writeAsStringAsync(dest, b64, { encoding: FileSystem.EncodingType.Base64 });
+          resolvedSrcUri = dest;
+        }
       }
+
+      // toFFmpegPath: 去掉 file:// 前缀，HarmonyOS FFmpegKit 需要裸绝对路径
+      const toFFmpegPath = (uri: string) => uri.startsWith("file://") ? uri.replace(/^file:\/\//, "") : uri;
 
       // 每个音轨的 FFmpeg 滤镜（频率域分离）
       // 人声：中心声道提取 (L+R)/2；伴奏：侧声道残差 (L-R)；其余为 EQ 截取
@@ -301,7 +318,8 @@ export default function StemScreen() {
 
         // FFmpeg 命令：中心/侧声道分离（立体声输入）
         // 单声道输入时 pan 滤镜会报错，用 aecho 替代
-        const cmd = `-y -i "${resolvedSrcUri}" -af "${filter}" -ar 48000 -acodec pcm_s24le "${outUri}"`;
+        // toFFmpegPath: HarmonyOS 必须使用裸绝对路径，file:// 前缀会导致崩溃
+        const cmd = `-y -i "${toFFmpegPath(resolvedSrcUri)}" -af "${filter}" -ar 48000 -acodec pcm_s24le "${toFFmpegPath(outUri)}"`;
         const session = await FFmpegKit.execute(cmd);
         const rc = await session.getReturnCode();
 
@@ -314,7 +332,7 @@ export default function StemScreen() {
             bass:         "lowpass=f=200,volume=1.8",
             other:        "highpass=f=2000,volume=1.2",
           };
-          const fbCmd = `-y -i "${resolvedSrcUri}" -af "${fallbackFilter[k]}" -ar 48000 -acodec pcm_s24le "${outUri}"`;
+          const fbCmd = `-y -i "${toFFmpegPath(resolvedSrcUri)}" -af "${fallbackFilter[k]}" -ar 48000 -acodec pcm_s24le "${toFFmpegPath(outUri)}"`;
           await FFmpegKit.execute(fbCmd);
         }
 

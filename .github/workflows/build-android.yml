@@ -95,3 +95,33 @@ jobs:
           path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 14
+
+      # ── 自动创建 GitHub Release（公开下载，无需登录）──────────────────────
+      - name: 读取版本号
+        id: get_version
+        run: |
+          VERSION=$(node -e "const a=require('./app.json'); console.log(a.expo.version)")
+          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: 创建 GitHub Release 并上传 APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}-${{ github.run_number }}
+          name: "Release ${{ steps.get_version.outputs.version }} (build ${{ github.run_number }})"
+          body: |
+            ## 📱 AI 音乐音频处理 Pro
+
+            ### 本次更新
+            - 修复 HarmonyOS（华为鸿蒙）FFmpegKit `file://` 前缀崩溃问题
+            - 新增 Base64 回退策略，兼容鸿蒙沙箱文件访问限制
+            - 修复音乐分离（Stem）同类路径问题
+
+            ### 安装说明
+            下载 `app-release.apk` 并在手机上直接安装（需开启「允许未知来源」）。
+
+            Commit: ${{ github.sha }}
+          files: android/app/build/outputs/apk/release/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
