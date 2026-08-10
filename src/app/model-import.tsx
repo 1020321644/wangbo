@@ -9,13 +9,13 @@
  *   - novasr     : NovaSR 16k→48k（229 KB）— 轻量超分备选
  */
 import { View, Text, ScrollView, Pressable, ActivityIndicator } from "react-native";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useRouter, useFocusEffect } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import {
-  ChevronLeft, Upload, Trash2, Cpu, CheckCircle2, AlertCircle, Package,
+  ChevronLeft, Upload, Trash2, Cpu, CheckCircle2, AlertCircle, Package, RefreshCw,
 } from "lucide-react-native";
 import {
   AlertDialog,
@@ -29,7 +29,13 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useColors } from "@/lib/theme";
 import { useModelStore, type ModelEntry } from "@/store/modelStore";
-import { BUNDLED_MODEL_URIS } from "@/lib/modelBootstrap";
+import {
+  BUNDLED_MODEL_URIS,
+  getModelStatus,
+  subscribeModelStatus,
+  reExtractBundledModels,
+  type ModelStatus,
+} from "@/lib/modelBootstrap";
 
 interface ModelSlot {
   id: ModelEntry["id"];
@@ -91,6 +97,14 @@ export default function ModelImportScreen() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ModelEntry["id"] | null>(null);
+  const [reExtracting, setReExtracting] = useState(false);
+
+  // 内置模型解包状态（实时刷新）
+  const [bundledStatus, setBundledStatus] = useState<Record<string, ModelStatus>>(getModelStatus);
+
+  useEffect(() => {
+    return subscribeModelStatus(() => setBundledStatus(getModelStatus()));
+  }, []);
 
   // 每次进入页面时清空提示
   useFocusEffect(
@@ -99,6 +113,20 @@ export default function ModelImportScreen() {
       setInfo(null);
     }, []),
   );
+
+  const handleReExtract = async () => {
+    setError(null);
+    setInfo(null);
+    setReExtracting(true);
+    try {
+      await reExtractBundledModels();
+      setInfo("内置模型已重新解压，请检查状态是否变为「内置就绪 ✓」");
+    } catch (e) {
+      setError("重新解压失败：" + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setReExtracting(false);
+    }
+  };
 
   const handleImport = async (slot: ModelSlot) => {
     setError(null);
@@ -237,6 +265,32 @@ export default function ModelImportScreen() {
             App 已内置三个默认 ONNX 模型（GTCRN / HiFi-GAN+ BWE / NovaSR），开箱即用。
             如需使用更新版本，可从手机本地导入 .onnx 文件覆盖内置版本（热插拔）。
           </Text>
+          {/* 重新解包按钮 */}
+          <Pressable
+            onPress={handleReExtract}
+            disabled={reExtracting}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              borderWidth: 1,
+              borderColor: C.border,
+              backgroundColor: reExtracting ? `${C.muted}20` : "transparent",
+              paddingVertical: 8,
+              marginTop: 4,
+              opacity: reExtracting ? 0.6 : 1,
+            }}
+          >
+            {reExtracting ? (
+              <ActivityIndicator size={12} color={C.muted} />
+            ) : (
+              <RefreshCw size={12} color={C.muted} />
+            )}
+            <Text style={{ fontFamily: "monospace", fontSize: 9, color: C.muted }}>
+              {reExtracting ? "解压中…" : "重新解压内置模型"}
+            </Text>
+          </Pressable>
         </View>
 
         {/* 提示信息 */}
@@ -262,13 +316,17 @@ export default function ModelImportScreen() {
           const entry = models[slot.id];
           const imported = !!entry;
           const importing = importingId === slot.id;
+          const bStatus: ModelStatus = bundledStatus[slot.id] ?? "idle";
+          // 最终就绪：用户自定义 OR 内置就绪
+          const isReady = imported || bStatus === "ready";
+          const borderColor = imported ? C.orange : bStatus === "ready" ? C.green ?? "#22c55e" : bStatus === "failed" ? C.destructive : C.border;
 
           return (
             <View
               key={slot.id}
               style={{
                 borderWidth: 1,
-                borderColor: imported ? C.orange : C.border,
+                borderColor: borderColor,
                 backgroundColor: C.panel,
               }}
             >
@@ -289,13 +347,13 @@ export default function ModelImportScreen() {
                       width: 28,
                       height: 28,
                       borderWidth: 1,
-                      borderColor: imported ? C.orange : C.border,
+                      borderColor: isReady ? (imported ? C.orange : C.green) : C.border,
                       alignItems: "center",
                       justifyContent: "center",
-                      backgroundColor: imported ? `${C.orange}15` : "transparent",
+                      backgroundColor: isReady ? `${imported ? C.orange : C.green}15` : "transparent",
                     }}
                   >
-                    <Cpu size={14} color={imported ? C.orange : C.muted} />
+                    <Cpu size={14} color={isReady ? (imported ? C.orange : C.green) : C.muted} />
                   </View>
                   <View>
                     <Text style={{ fontFamily: "monospace", fontSize: 11, fontWeight: "bold", color: C.text }}>
@@ -306,6 +364,7 @@ export default function ModelImportScreen() {
                     </Text>
                   </View>
                 </View>
+                {/* 状态标签 */}
                 {imported ? (
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
                     <CheckCircle2 size={12} color={C.orange} />
@@ -313,10 +372,27 @@ export default function ModelImportScreen() {
                       已自定义
                     </Text>
                   </View>
+                ) : bStatus === "ready" ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                    <CheckCircle2 size={12} color={C.green} />
+                    <Text style={{ fontFamily: "monospace", fontSize: 9, fontWeight: "bold", color: C.green }}>
+                      内置就绪 ✓
+                    </Text>
+                  </View>
+                ) : bStatus === "extracting" ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                    <ActivityIndicator size={10} color={C.muted} />
+                    <Text style={{ fontFamily: "monospace", fontSize: 9, color: C.muted }}>解压中…</Text>
+                  </View>
+                ) : bStatus === "failed" ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                    <AlertCircle size={12} color={C.destructive} />
+                    <Text style={{ fontFamily: "monospace", fontSize: 9, color: C.destructive }}>解压失败</Text>
+                  </View>
                 ) : (
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
                     <Package size={12} color={C.muted} />
-                    <Text style={{ fontFamily: "monospace", fontSize: 9, color: C.muted }}>内置版本</Text>
+                    <Text style={{ fontFamily: "monospace", fontSize: 9, color: C.muted }}>初始化中</Text>
                   </View>
                 )}
               </View>
