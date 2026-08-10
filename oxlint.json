@@ -1,0 +1,6 @@
+{
+  "rules": {
+    "expo-notifications-config/no-invalid-notification-config": "off"
+  },
+  "ignorePatterns": ["plugins/**", "scripts/**"]
+}

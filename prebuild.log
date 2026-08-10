@@ -1,0 +1,16 @@
+env: load .env
+env: export EXPO_PUBLIC_APP_ID EXPO_PUBLIC_SUPABASE_ANON_KEY EXPO_PUBLIC_SUPABASE_URL
+- Clearing android, ios
+✔ Cleared android, ios code
+- Creating native directories (./ios and ./android)
+✔ Created native directories
+- Updating package.json
+✔ Updated package.json
+- Running prebuild
+[android-audio-capture] Android project path not found: /workspace/app-dgir8owph2ip/android/app/src/main/java/com/com/audiophile/converter
+- Running prebuild
+[android-audio-capture] Native code will be injected during build
+- Running prebuild
+✔ Finished prebuild
+- Installing CocoaPods...
+✔ Skipped installing CocoaPods because operating system is not on macOS.
