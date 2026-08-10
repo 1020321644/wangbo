@@ -292,8 +292,7 @@ export default function StemScreen() {
         }
       }
 
-      // toFFmpegPath: 去掉 file:// 前缀，HarmonyOS FFmpegKit 需要裸绝对路径
-      const toFFmpegPath = (uri: string) => uri.startsWith("file://") ? uri.replace(/^file:\/\//, "") : uri;
+      // toFFmpegPath 已移除：file:// URI 直接传入，HarmonyOS FFmpegKit 正常识别（与初始版本一致）
 
       // 每个音轨的 FFmpeg 滤镜（频率域分离）
       // 人声：中心声道提取 (L+R)/2；伴奏：侧声道残差 (L-R)；其余为 EQ 截取
@@ -318,8 +317,8 @@ export default function StemScreen() {
 
         // FFmpeg 命令：中心/侧声道分离（立体声输入）
         // 单声道输入时 pan 滤镜会报错，用 aecho 替代
-        // toFFmpegPath: HarmonyOS 必须使用裸绝对路径，file:// 前缀会导致崩溃
-        const cmd = `-y -i "${toFFmpegPath(resolvedSrcUri)}" -af "${filter}" -ar 48000 -acodec pcm_s24le "${toFFmpegPath(outUri)}"`;
+        // file:// URI 直接传入 — 与初始版本保持一致，HarmonyOS FFmpegKit 正常识别
+        const cmd = `-y -i "${resolvedSrcUri}" -af "${filter}" -ar 48000 -acodec pcm_s24le "${outUri}"`;
         const session = await FFmpegKit.execute(cmd);
         const rc = await session.getReturnCode();
 
@@ -332,7 +331,7 @@ export default function StemScreen() {
             bass:         "lowpass=f=200,volume=1.8",
             other:        "highpass=f=2000,volume=1.2",
           };
-          const fbCmd = `-y -i "${toFFmpegPath(resolvedSrcUri)}" -af "${fallbackFilter[k]}" -ar 48000 -acodec pcm_s24le "${toFFmpegPath(outUri)}"`;
+          const fbCmd = `-y -i "${resolvedSrcUri}" -af "${fallbackFilter[k]}" -ar 48000 -acodec pcm_s24le "${outUri}"`;
           await FFmpegKit.execute(fbCmd);
         }
 

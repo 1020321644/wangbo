@@ -100,17 +100,6 @@ export async function resolveNativeUri(uri: string, ext: string): Promise<string
   return destUri;
 }
 
-/**
- * 将 file:// URI 转换为 FFmpegKit 命令行裸路径。
- * ⚠️ HarmonyOS（华为鸿蒙）和部分 Android 设备的 FFmpegKit 原生层
- *    不识别 file:// scheme，传入带前缀路径会导致立即崩溃（闪退）。
- *    所有 FFmpegKit.execute / FFprobeKit 调用必须使用此函数转换路径。
- */
-function toFFmpegPath(uri: string): string {
-  // file:///data/user/0/.../cache/xxx.wav → /data/user/0/.../cache/xxx.wav
-  return uri.startsWith("file://") ? uri.replace(/^file:\/\//, "") : uri;
-}
-
 // 确定性伪随机，保证同一文件每次生成相同波形/频谱
 function seededRandom(seed: number): () => number {
   let s = seed % 2147483647;
@@ -274,13 +263,14 @@ export async function runConvert(
   const { FFmpegKit, FFprobeKit, ReturnCode } = await import("ffmpeg-kit-react-native");
 
   // ⚠️ Android/HarmonyOS content:// URI → file:// 缓存（resolveNativeUri 双重策略保障）
+  // DocumentPicker(copyToCacheDirectory:true) → 已是 file:// → 直接透传给 FFmpegKit
   const nativeSrcUri = await resolveNativeUri(sourceUri, sourceName.split(".").pop()?.toLowerCase() ?? "audio");
 
   // 获取音频时长（用于进度回调）
   let durationMs = estimateDuration(sourceSize ?? 0, target, params.masterEnhance);
   try {
-    // toFFmpegPath: 去掉 file:// 前缀，防止 HarmonyOS FFmpegKit 崩溃
-    const probe = await FFprobeKit.getMediaInformation(toFFmpegPath(nativeSrcUri));
+    // file:// URI 直接传入 FFmpegKit/FFprobeKit — HarmonyOS FFmpegKit 识别 file:// scheme
+    const probe = await FFprobeKit.getMediaInformation(nativeSrcUri);
     const info2 = probe.getMediaInformation?.();
     if (info2) durationMs = parseFloat(String(info2.getDuration?.() ?? "0")) * 1000 || durationMs;
   } catch { /* 忽略 */ }
@@ -346,16 +336,16 @@ export async function runConvert(
     // ONNX 不可用 → FFmpeg DSP 增强兜底
     onEngine?.("ffmpeg-dsp");
     onProgress(0.02, "FFmpeg DSP 增强（无 ONNX 模型）...");
-    // toFFmpegPath: 传入裸路径防 HarmonyOS file:// 崩溃
-    await runFFmpegEnhance(toFFmpegPath(nativeSrcUri), toFFmpegPath(outUri), params, durationMs, startTs, onProgress, FFmpegKit, ReturnCode);
+    // file:// URI 直接传入 — HarmonyOS FFmpegKit 识别 file:// scheme
+    await runFFmpegEnhance(nativeSrcUri, outUri, params, durationMs, startTs, onProgress, FFmpegKit, ReturnCode);
     return outUri;
   }
 
   // ── 纯格式转换路径（masterEnhance=false）─────────────────────────────────
   onEngine?.("none");
   const ffmpegArgs = buildFfmpegArgs(target, params);
-  // toFFmpegPath: 去掉 file:// 前缀，HarmonyOS FFmpegKit 需要裸绝对路径
-  const command = `-i "${toFFmpegPath(nativeSrcUri)}" ${ffmpegArgs.join(" ")} -y "${toFFmpegPath(outUri)}"`;
+  // file:// URI 直接传入 — 与初始版本保持一致，HarmonyOS 可正常识别
+  const command = `-i "${nativeSrcUri}" ${ffmpegArgs.join(" ")} -y "${outUri}"`;
   console.log("[audioEngine] 格式转换:", command);
 
   await new Promise<void>((resolve, reject) => {
@@ -890,19 +880,20 @@ export async function applyProcessing(
   const { FFmpegKit, FFprobeKit, ReturnCode } = await import("ffmpeg-kit-react-native");
 
   // ⚠️ Android/HarmonyOS content:// URI → file:// 缓存（resolveNativeUri 双重策略保障）
+  // DocumentPicker(copyToCacheDirectory:true) → 已是 file:// → 直接透传给 FFmpegKit
   const nativeSrcUri = await resolveNativeUri(sourceUri, sourceName.split(".").pop()?.toLowerCase() ?? "audio");
 
   let durationMs = estimateDuration(sourceSize ?? 0, "WAV", true);
   try {
-    // toFFmpegPath: 去掉 file:// 前缀，防止 HarmonyOS FFmpegKit 崩溃
-    const probe = await FFprobeKit.getMediaInformation(toFFmpegPath(nativeSrcUri));
+    // file:// URI 直接传入 — HarmonyOS FFmpegKit 识别 file:// scheme
+    const probe = await FFprobeKit.getMediaInformation(nativeSrcUri);
     const info2 = probe.getMediaInformation?.();
     if (info2) durationMs = parseFloat(String(info2.getDuration?.() ?? "0")) * 1000 || durationMs;
   } catch { /* 忽略 */ }
 
   const filterStr = filters.length > 0 ? filters.join(",") : "anull";
-  // toFFmpegPath: 去掉 file:// 前缀，防止 HarmonyOS FFmpegKit 崩溃
-  const command = `-i "${toFFmpegPath(nativeSrcUri)}" -af "${filterStr}" -ar 48000 -sample_fmt s32 -c:a pcm_s24le -y "${toFFmpegPath(outUri)}"`;
+  // file:// URI 直接传入 — 与初始版本保持一致，HarmonyOS FFmpegKit 正常识别
+  const command = `-i "${nativeSrcUri}" -af "${filterStr}" -ar 48000 -sample_fmt s32 -c:a pcm_s24le -y "${outUri}"`;
   console.log("[audioEngine] 参数处理:", command);
 
   await new Promise<void>((resolve, reject) => {
