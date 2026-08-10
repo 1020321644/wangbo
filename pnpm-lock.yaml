@@ -142,6 +142,9 @@ importers:
       expo-build-properties:
         specifier: ~55.0.16
         version: 55.0.16(expo@55.0.6)
+      expo-clipboard:
+        specifier: ~55.0.15
+        version: 55.0.15(expo@55.0.6)(react-native@0.83.2(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.0))(react@19.2.0)
       expo-constants:
         specifier: ~55.0.7
         version: 55.0.17(expo@55.0.6)(react-native@0.83.2(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.0))
@@ -3369,6 +3372,13 @@ packages:
     resolution: {integrity: sha512-i8vRqvbGQHfNGMx9iKKtJzK3/KODD2HsOIBrzQGns3ShwMc/6+J6kHDBpph6BpDAWihi6kY7VIDMKiN7ov8PhQ==}
     peerDependencies:
       expo: '*'
+
+  expo-clipboard@55.0.15:
+    resolution: {integrity: sha512-1TQ5wx3l8WJauFCuvL5NDEnB9VMboi9IUc5XM2/3/wf4sAKwif9TlFkB5GRah1a4U1yqUWJVT9hJa3rUFrHc8g==}
+    peerDependencies:
+      expo: '*'
+      react: '*'
+      react-native: '*'
 
   expo-constants@55.0.17:
     resolution: {integrity: sha512-t0SNWmXTjXPCHzjNsv1Okjaj8SpXQcUjDPtYDqvofDS+BhAsvlKNmwaaWXvduBjjmmmJWNH8q1/x9IWQ+upg8g==}
@@ -9047,6 +9057,12 @@ snapshots:
       expo: 55.0.6(patch_hash=d2507f55976f6c5da8f35d26906f4bd46415e042570afc3bd7c543c86abc5a61)(@babel/core@7.29.7)(@expo/dom-webview@55.0.6)(@expo/metro-runtime@55.0.11)(expo-router@55.0.5)(react-dom@19.2.0(react@19.2.0))(react-native@0.83.2(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.0))(react@19.2.0)(typescript@5.9.3)
       resolve-from: 5.0.0
       semver: 7.8.5
+
+  expo-clipboard@55.0.15(expo@55.0.6)(react-native@0.83.2(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.0))(react@19.2.0):
+    dependencies:
+      expo: 55.0.6(patch_hash=d2507f55976f6c5da8f35d26906f4bd46415e042570afc3bd7c543c86abc5a61)(@babel/core@7.29.7)(@expo/dom-webview@55.0.6)(@expo/metro-runtime@55.0.11)(expo-router@55.0.5)(react-dom@19.2.0(react@19.2.0))(react-native@0.83.2(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.0))(react@19.2.0)(typescript@5.9.3)
+      react: 19.2.0
+      react-native: 0.83.2(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.0)
 
   expo-constants@55.0.17(expo@55.0.6)(react-native@0.83.2(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.0)):
     dependencies:

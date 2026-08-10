@@ -305,9 +305,10 @@ export default function StemScreen() {
       const gainBass  = (1.0 + (sepStrength / 100) * 0.8).toFixed(2);       // 1.0 ~ 1.8
       const gainOther = (0.8 + (sepStrength / 100) * 0.5).toFixed(2);       // 0.8 ~ 1.3
 
+      // 人声残留优化：afftdn 频域降噪 + stereotools 中置提取 + 多段人声频段增强
       const STEM_FILTER: Record<StemKey, string> = {
-        // 人声：中心声道 + 中频人声区增强 + 去低频噪声
-        vocal: `pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,highpass=f=180,equalizer=f=1200:width_type=o:width=2:g=3,equalizer=f=3000:width_type=o:width=2:g=2,volume=${gainVocal}`,
+        // 人声：中心声道提取 + 频域降噪 + 人声频段增强 + 去低频/高频
+        vocal: `pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,highpass=f=120,lowpass=f=8000,afftdn=nr=12:nf=-25,equalizer=f=2000:width_type=o:width=2:g=4,equalizer=f=4000:width_type=o:width=2:g=3,volume=${gainVocal}`,
         // 伴奏：侧声道残差消人声 + 低频/高频乐器增强
         instrumental: `pan=stereo|c0=c0-c1|c1=c1-c0,equalizer=f=200:width_type=o:width=2:g=3,equalizer=f=6000:width_type=o:width=2:g=1.5,volume=${gainInstr}`,
         // 鼓：低频冲击 + 增益

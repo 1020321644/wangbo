@@ -75,6 +75,11 @@ export default function ParamsScreen() {
               />
             ))}
           </View>
+          <View className="border-t border-border px-3 py-2">
+            <Text className="font-mono text-[10px] text-muted-foreground">
+              有损格式（MP3/AAC/OGG）位深不可选；无损格式（FLAC/WAV/ALAC）可选 16/24/32bit。
+            </Text>
+          </View>
         </Panel>
 
         <Panel title="码率 BITRATE">
@@ -87,6 +92,21 @@ export default function ParamsScreen() {
                 onPress={() => params.setBitrate(br)}
               />
             ))}
+          </View>
+        </Panel>
+
+        <Panel title="高质量模式 HIGH QUALITY">
+          <View className="flex-row items-center justify-between p-4">
+            <View className="flex-1 pr-3" style={{ minWidth: 0 }}>
+              <View className="flex-row items-center gap-2">
+                <Sparkles size={16} color={C.cyan} strokeWidth={1.5} />
+                <Text className="font-mono text-sm font-bold text-foreground">保持源参数 · 仅封装不重编码</Text>
+              </View>
+              <Text className="mt-1 font-mono text-[10px] leading-4 text-muted-foreground">
+                开启后使用 -c copy 直接复制原始流，零音质损失，转换最快。适用于同格式封装或无损互转。
+              </Text>
+            </View>
+            <Toggle value={!!params.highQuality} onValueChange={params.setHighQuality} />
           </View>
         </Panel>
 

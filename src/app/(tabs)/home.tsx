@@ -615,6 +615,7 @@ export default function HomeScreen() {
             <DataRow label="采样率 SR" value={params.sampleRate} valueColor={C.cyan} />
             <DataRow label="位深 BD" value={targetInfo.supportsBitDepth ? params.bitDepth : "—"} valueColor={C.cyan} />
             <DataRow label="码率 BR" value={targetInfo.supportsBitrate ? params.bitrate : "—"} valueColor={C.cyan} />
+            <DataRow label="高质量模式" value={params.highQuality ? "ON · 仅封装不重编码" : "OFF"} valueColor={params.highQuality ? C.cyan : C.muted} />
             <DataRow label="母带级提升" value={params.masterEnhance ? `ON · ${params.enhanceLevel === "advanced" ? "困难模式 AudioSR" : "简单模式 DeepFilterNet"}` : "OFF"} valueColor={params.masterEnhance ? C.orange : C.muted} />
             <DataRow label="动态范围目标" value="DR14+" valueColor={C.cyan} />
             <DataRow label="响度标准" value="-14 LUFS (Streaming)" valueColor={C.cyan} />

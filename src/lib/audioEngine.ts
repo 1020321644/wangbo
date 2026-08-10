@@ -218,6 +218,8 @@ export interface ConvertParams {
   masterEnhance: boolean;
   /** AI 增强档位（仅 masterEnhance=true 时生效；可选，默认 simple） */
   enhanceLevel?: EnhanceLevel;
+  /** 高质量模式：保持源参数，仅重新封装不重编码（-c copy） */
+  highQuality?: boolean;
 }
 
 // 根据目标格式和参数估算输出文件大小（字节）
@@ -417,7 +419,25 @@ export async function runConvert(
   const rawSrc = toFFmpegPath(nativeSrcUri);
   const rawOut = toFFmpegPath(outUri);
 
-  // ③ 步骤 1：先尝试 -c copy（最简命令），诊断 FFmpegKit 是否正常初始化
+  // ③ 高质量模式：仅重新封装不重编码（-c copy），保留源参数
+  if (params.highQuality) {
+    const copyCmd = `-i "${rawSrc}" -c copy -y "${rawOut}"`;
+    console.log("[audioEngine][高质量模式] 发送 -c copy 命令...");
+    try {
+      await execFFmpegCmd(FFmpegKit, ReturnCode, copyCmd, "highquality-copy",
+        (p, l) => onProgress(p, l), durationMs, "高质量封装");
+      const stat = await FileSystem.getInfoAsync(outUri);
+      if (stat.exists && (stat as any).size > 0) {
+        onProgress(1, "输出文件就绪（高质量封装）");
+        return outUri;
+      }
+      console.warn("[audioEngine][高质量模式] -c copy 输出为空，降级重编码");
+    } catch (copyErr) {
+      console.warn("[audioEngine][高质量模式] -c copy 失败，降级重编码:", copyErr);
+    }
+  }
+
+  // ④ 步骤 1：先尝试 -c copy（最简命令），诊断 FFmpegKit 是否正常初始化
   const copyCmd = `-i "${rawSrc}" -c copy -y "${rawOut}"`;
   console.log("[audioEngine][步骤1] 发送 -c copy 简化测试命令...");
   let copySucceeded = false;
@@ -437,7 +457,7 @@ export async function runConvert(
     return outUri;
   }
 
-  // ④ 步骤 2：完整重编码转换
+  // ⑤ 步骤 2：完整重编码转换
   const ffmpegArgs = buildFfmpegArgs(target, params);
   const command = `-i "${rawSrc}" ${ffmpegArgs.join(" ")} -y "${rawOut}"`;
   console.log("[audioEngine][步骤2] 完整编码命令 ↓");
@@ -447,7 +467,22 @@ export async function runConvert(
       (p, l) => onProgress(p, l), durationMs, `编码 ${target}`);
   } catch (convertErr) {
     console.error("[audioEngine][步骤2] 完整转换失败:", convertErr);
-    // 降级：直接复制原文件
+    // ⑥ 降级：MediaCodec 硬件编码（AAC，兼容性兜底）
+    console.warn("[audioEngine][步骤3] 尝试 MediaCodec 硬件编码降级...");
+    const mcBitrate = Number(params.bitrate.replace(/[^\d]/g, "") || "320");
+    const mcCmd = `-i "${rawSrc}" -c:a aac_mediacodec -b:a ${mcBitrate}k -ar ${sampleRateNumOf(params)} -y "${rawOut}"`;
+    try {
+      await execFFmpegCmd(FFmpegKit, ReturnCode, mcCmd, "mediacodec-fallback",
+        (p, l) => onProgress(p, l), durationMs, "硬件编码降级");
+      const mcStat = await FileSystem.getInfoAsync(outUri);
+      if (mcStat.exists && (mcStat as any).size > 0) {
+        onProgress(1, "输出文件就绪（硬件编码降级）");
+        return outUri;
+      }
+    } catch (mcErr) {
+      console.error("[audioEngine][步骤3] MediaCodec 降级失败:", mcErr);
+    }
+    // 最终兜底：直接复制原文件
     const fallExt = sourceName.split(".").pop()?.toLowerCase() ?? "audio";
     const fallUri = `${cacheDir}fallback_${Date.now()}.${fallExt}`;
     console.warn(`[audioEngine][降级] 拷贝原文件 → ${fallUri}`);
@@ -456,7 +491,7 @@ export async function runConvert(
     return fallUri;
   }
 
-  // ⑤ 验证输出
+  // ⑦ 验证输出
   const stat = await FileSystem.getInfoAsync(outUri);
   console.log(`[audioEngine][验证] 输出: 存在=${stat.exists}, 大小=${(stat as any).size ?? 0}`);
   if (!stat.exists || !(stat as any).size || (stat as any).size === 0) {
@@ -467,6 +502,13 @@ export async function runConvert(
     return fallUri;
   }
   return outUri;
+}
+
+/** 从 ConvertParams.sampleRate 解析 Hz 数值（用于 MediaCodec 降级） */
+function sampleRateNumOf(params: ConvertParams): number {
+  const srRaw = params.sampleRate.replace(/kHz$/i, "").trim();
+  const srFloat = parseFloat(srRaw);
+  return Math.round(srFloat * (srFloat < 400 ? 1000 : 1));
 }
 
 // ── STFT / ISTFT 工具函数（供 GTCRN 使用） ──────────────────────────────────

@@ -10,6 +10,7 @@ interface ParamState extends ConvertParams {
   setBitrate: (v: string) => void;
   setMasterEnhance: (v: boolean) => void;
   setEnhanceLevel: (v: EnhanceLevel) => void;
+  setHighQuality: (v: boolean) => void;
   reset: () => void;
 }
 
@@ -19,6 +20,7 @@ const DEFAULT: ConvertParams = {
   bitrate: "320kbps",
   masterEnhance: true,
   enhanceLevel: "simple",
+  highQuality: false,
 };
 
 // 防抖持久化：延迟 800ms 写库，避免每次滑动立刻触发
@@ -67,6 +69,10 @@ export const useParamStore = create<ParamState>((set, get) => ({
   setEnhanceLevel: (v) => {
     set({ enhanceLevel: v });
     scheduleSave({ ...get(), enhanceLevel: v });
+  },
+  setHighQuality: (v) => {
+    set({ highQuality: v });
+    scheduleSave({ ...get(), highQuality: v });
   },
   reset: () => {
     set({ ...DEFAULT });

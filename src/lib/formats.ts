@@ -40,7 +40,7 @@ export const FORMAT_LIST: FormatInfo[] = [
 
 export const SAMPLE_RATES = ["44.1kHz", "48kHz", "88.2kHz", "96kHz", "176.4kHz", "192kHz", "352.8kHz", "384kHz"];
 export const BIT_DEPTHS = ["16bit", "24bit", "32bit"];
-export const BITRATES = ["128kbps", "192kbps", "256kbps", "320kbps", "640kbps", "990kbps"];
+export const BITRATES = ["96kbps", "128kbps", "192kbps", "256kbps", "320kbps", "640kbps", "990kbps"];
 
 export function getFormat(key: AudioFormat): FormatInfo {
   return FORMAT_LIST.find((f) => f.key === key) ?? FORMAT_LIST[0];
