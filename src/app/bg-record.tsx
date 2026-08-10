@@ -9,16 +9,18 @@
  *  - 建议：在安静环境下，手机靠近音源（音箱/耳机外放），获得最佳录制效果
  */
 
-import { useState, useCallback, useEffect } from "react";
-import { View, Text, ScrollView, Pressable, ActivityIndicator } from "react-native";
+import { useState, useCallback, useEffect, useRef } from "react";
+import { View, Text, ScrollView, Pressable, ActivityIndicator, Modal } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import {
   StopCircle, CheckCircle2, AlertTriangle,
   Info, Music2, Disc, ArrowLeft, Radio,
   ChevronDown, ChevronUp, SlidersHorizontal, Sparkles,
-  Zap, Headphones,
+  Zap, Headphones, ShieldAlert, Copy, Mic, Wifi, Loader,
+  CheckCheck, Terminal,
 } from "lucide-react-native";
+import * as Clipboard from "expo-clipboard";
 import { useColors } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { useFileStore } from "@/store/fileStore";
@@ -29,6 +31,29 @@ import {
 import { useAIAnalysis } from "@/hooks/useAIAnalysis";
 import { Panel, ScreenHeader, Badge, Chip } from "@/components/ui";
 import { RecordWaveform } from "@/components/RecordWaveform";
+import {
+  checkCapturePermission,
+  checkWirelessAdb,
+  runAdbGrant,
+  getAdbCommand,
+} from "@/lib/adbAuth";
+
+// ─── ADB 授权弹窗状态 ─────────────────────────────────────────────────────────
+type AdbGrantStep = "idle" | "checking_port" | "granting" | "success" | "failed" | "no_binary";
+type AdbModalStep = "menu" | "manual_guide";    // menu=三按钮; manual_guide=复制命令步骤图
+
+// ─── 是否鸿蒙系统（依据 Build.MANUFACTURER 结果） ────────────────────────────
+function useIsHarmony(): boolean {
+  const [isHarmony, setIsHarmony] = useState(false);
+  useEffect(() => {
+    // 仅 Android 需要检测
+    if (process.env.EXPO_OS !== "android") return;
+    import("@/lib/adbAuth").then(({ isHarmonyOS }) =>
+      isHarmonyOS().then(setIsHarmony)
+    );
+  }, []);
+  return isHarmony;
+}
 
 const STEPS = [
   { num: "01", text: "在本 APP 播放器中选好歌曲，点击播放" },
@@ -107,9 +132,10 @@ export default function BgRecordScreen() {
   } = useMasterRecord();
 
   const [paramsOpen, setParamsOpen] = useState(false);
-  
+
   // 仅 Android 支持系统内录（MediaProjection）
   const isAndroid = process.env.EXPO_OS === "android";
+  const isHarmony = useIsHarmony();
 
   // 非 Android 平台强制降级为麦克风模式
   useEffect(() => {
@@ -117,6 +143,71 @@ export default function BgRecordScreen() {
       setRecordMode("microphone");
     }
   }, [isAndroid, recordMode, setRecordMode]);
+
+  // ── ADB 授权弹窗状态 ──────────────────────────────────────────────────────
+  const [adbModal, setAdbModal]         = useState(false);
+  const [adbModalStep, setAdbModalStep] = useState<AdbModalStep>("menu");
+  const [adbGrantStep, setAdbGrantStep] = useState<AdbGrantStep>("idle");
+  const [adbLog, setAdbLog]             = useState("");
+  const [copied, setCopied]             = useState(false);
+  const adbCmdRef                       = useRef<string>("");
+
+  /** 点击"系统内录"时：先检查权限，已授权直接切换，否则弹窗 */
+  const handleSelectSystem = useCallback(async () => {
+    if (!isAndroid) return;
+    const granted = await checkCapturePermission();
+    if (granted) {
+      setRecordMode("system");
+    } else {
+      // 预取命令字符串
+      getAdbCommand().then((cmd) => { adbCmdRef.current = cmd; });
+      setAdbModalStep("menu");
+      setAdbGrantStep("idle");
+      setAdbLog("");
+      setCopied(false);
+      setAdbModal(true);
+    }
+  }, [isAndroid, setRecordMode]);
+
+  /** 一键授权：检测端口 → 执行 adb grant */
+  const handleOneClickGrant = useCallback(async () => {
+    setAdbGrantStep("checking_port");
+    const portResult = await checkWirelessAdb();
+    if (!portResult.available) {
+      // 端口未开放 → 降级为手动步骤
+      setAdbGrantStep("failed");
+      setAdbModalStep("manual_guide");
+      return;
+    }
+    setAdbGrantStep("granting");
+    const result = await runAdbGrant();
+    setAdbLog(result.output || result.error || "");
+    if (result.error === "ADB_BINARY_NOT_FOUND") {
+      setAdbGrantStep("no_binary");
+      setAdbModalStep("manual_guide");
+      return;
+    }
+    if (result.success) {
+      setAdbGrantStep("success");
+      // 授权成功：自动切换模式并关闭弹窗
+      setTimeout(() => {
+        setRecordMode("system");
+        setAdbModal(false);
+      }, 1200);
+    } else {
+      setAdbGrantStep("failed");
+      setAdbModalStep("manual_guide");
+    }
+  }, [setRecordMode]);
+
+  /** 复制 ADB 命令到剪贴板 */
+  const handleCopyCmd = useCallback(async () => {
+    const cmd = adbCmdRef.current || await getAdbCommand();
+    await Clipboard.setStringAsync(cmd);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+    setAdbModalStep("manual_guide");
+  }, []);
 
   const isIdle       = state.status === "idle";
   const isRequesting = state.status === "requesting";
@@ -164,6 +255,175 @@ export default function BgRecordScreen() {
         subtitle="BG MASTER CAPTURE"
         onBack={() => router.back()}
       />
+
+      {/* ── ADB 授权弹窗 ────────────────────────────────────────────────────── */}
+      <Modal
+        visible={adbModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAdbModal(false)}
+      >
+        <View className="flex-1 bg-black/60 items-center justify-center px-5">
+          <View className="w-full bg-background border border-border" style={{ borderCurve: "continuous", maxWidth: 380 }}>
+            {/* 标题栏 */}
+            <View className="flex-row items-center gap-2 border-b border-border px-4 py-3">
+              <ShieldAlert size={16} color="#F97316" strokeWidth={1.5} />
+              <Text className="font-mono text-sm font-bold text-foreground flex-1">系统内录需要授权</Text>
+              <Pressable onPress={() => setAdbModal(false)} className="px-2 py-1 active:opacity-60">
+                <Text className="font-mono text-xs text-muted-foreground">✕</Text>
+              </Pressable>
+            </View>
+
+            <View className="p-4 gap-3">
+              {/* 说明文字 */}
+              <View className="bg-destructive/10 border border-destructive/30 p-3 gap-1">
+                <Text className="font-mono text-[11px] text-destructive leading-5">
+                  系统内录需要 <Text className="font-bold">CAPTURE_AUDIO_OUTPUT</Text> 特权权限（Android 9+），
+                  该权限只能通过 ADB 命令授予，无法通过系统弹窗申请。
+                </Text>
+              </View>
+
+              {/* ── 菜单模式：三按钮 ── */}
+              {adbModalStep === "menu" && (
+                <View className="gap-2">
+                  {/* ① 一键授权 */}
+                  <Pressable
+                    onPress={handleOneClickGrant}
+                    disabled={adbGrantStep === "checking_port" || adbGrantStep === "granting"}
+                    className="flex-row items-center gap-3 bg-primary p-3.5 active:opacity-80"
+                    style={{ borderCurve: "continuous" }}
+                  >
+                    {(adbGrantStep === "checking_port" || adbGrantStep === "granting")
+                      ? <ActivityIndicator size="small" color="#fff" />
+                      : <Wifi size={18} color="#fff" strokeWidth={2} />}
+                    <View className="flex-1">
+                      <Text className="font-mono text-sm font-bold text-white">
+                        {adbGrantStep === "checking_port" ? "检测无线调试端口…"
+                          : adbGrantStep === "granting" ? "正在执行授权…"
+                          : adbGrantStep === "success" ? "✅ 授权成功！"
+                          : "① 一键授权（无线ADB）"}
+                      </Text>
+                      <Text className="font-mono text-[10px] text-white/70 leading-4">
+                        检测 5555 端口 → 自动执行 pm grant
+                      </Text>
+                    </View>
+                    {adbGrantStep === "success" && <CheckCheck size={18} color="#fff" strokeWidth={2} />}
+                  </Pressable>
+
+                  {/* ② 复制ADB命令 */}
+                  <Pressable
+                    onPress={handleCopyCmd}
+                    className="flex-row items-center gap-3 border border-border bg-card p-3.5 active:opacity-70"
+                    style={{ borderCurve: "continuous" }}
+                  >
+                    {copied
+                      ? <CheckCheck size={18} color="#22c55e" strokeWidth={2} />
+                      : <Copy size={18} color="#F97316" strokeWidth={1.5} />}
+                    <View className="flex-1">
+                      <Text className="font-mono text-sm font-bold text-foreground">
+                        {copied ? "✅ 已复制到剪贴板" : "② 复制ADB命令"}
+                      </Text>
+                      <Text className="font-mono text-[10px] text-muted-foreground leading-4">
+                        在电脑端粘贴执行，手动完成授权
+                      </Text>
+                    </View>
+                  </Pressable>
+
+                  {/* ③ 切换麦克风 */}
+                  <Pressable
+                    onPress={() => { setRecordMode("microphone"); setAdbModal(false); }}
+                    className="flex-row items-center gap-3 border border-border p-3.5 active:opacity-70"
+                    style={{ borderCurve: "continuous" }}
+                  >
+                    <Mic size={18} color="#F97316" strokeWidth={1.5} />
+                    <View className="flex-1">
+                      <Text className="font-mono text-sm font-bold text-foreground">③ 切换麦克风录制</Text>
+                      <Text className="font-mono text-[10px] text-muted-foreground leading-4">
+                        无需授权 · 全平台通用
+                      </Text>
+                    </View>
+                  </Pressable>
+
+                  {/* 诊断日志（失败时展示） */}
+                  {adbLog !== "" && (
+                    <View className="bg-card border border-border p-2 gap-1">
+                      <Text className="font-mono text-[9px] text-muted-foreground">诊断日志：</Text>
+                      <Text className="font-mono text-[9px] text-foreground leading-4">{adbLog}</Text>
+                    </View>
+                  )}
+                </View>
+              )}
+
+              {/* ── 手动步骤模式 ── */}
+              {adbModalStep === "manual_guide" && (
+                <View className="gap-3">
+                  {/* 状态标签 */}
+                  <View className="flex-row items-center gap-2 border border-amber-500/40 bg-amber-500/10 p-2.5">
+                    {adbGrantStep === "no_binary"
+                      ? <Terminal size={14} color="#F59E0B" strokeWidth={1.5} />
+                      : <Loader size={14} color="#F59E0B" strokeWidth={1.5} />}
+                    <Text className="font-mono text-[10px] text-amber-600 flex-1 leading-4">
+                      {adbGrantStep === "no_binary"
+                        ? "ADB 二进制未内置，请使用电脑手动执行命令"
+                        : "无线调试未开启或授权失败，请按以下步骤手动操作"}
+                    </Text>
+                  </View>
+
+                  {/* 步骤说明 */}
+                  {[
+                    { n: "01", t: "手机开启「开发者选项」→「无线调试」（或 USB 调试）" },
+                    { n: "02", t: "电脑连接同一 WiFi，终端输入 adb connect <手机IP>:5555" },
+                    { n: "03", t: "执行下方授权命令，完成后重新点击「系统内录」" },
+                  ].map((s) => (
+                    <View key={s.n} className="flex-row items-start gap-2">
+                      <View className="h-5 w-5 items-center justify-center border border-primary bg-primary/10 shrink-0 mt-0.5">
+                        <Text className="font-mono text-[9px] font-bold text-primary">{s.n}</Text>
+                      </View>
+                      <Text className="flex-1 font-mono text-[10px] leading-4 text-foreground">{s.t}</Text>
+                    </View>
+                  ))}
+
+                  {/* 命令框 + 复制 */}
+                  <View className="border border-primary/40 bg-card p-2.5 gap-2">
+                    <Text className="font-mono text-[9px] text-muted-foreground">授权命令：</Text>
+                    <Text className="font-mono text-[10px] text-primary leading-5 break-all" selectable>
+                      {adbCmdRef.current || "adb shell pm grant com.miaoda.appdk2quyiid79d android.permission.CAPTURE_AUDIO_OUTPUT"}
+                    </Text>
+                    <Pressable
+                      onPress={handleCopyCmd}
+                      className="flex-row items-center justify-center gap-2 border border-primary py-2 active:opacity-70"
+                    >
+                      {copied
+                        ? <CheckCheck size={14} color="#22c55e" strokeWidth={2} />
+                        : <Copy size={14} color="#F97316" strokeWidth={1.5} />}
+                      <Text className="font-mono text-xs font-bold text-primary">
+                        {copied ? "已复制" : "复制命令"}
+                      </Text>
+                    </Pressable>
+                  </View>
+
+                  {/* 返回 + 切换麦克风 */}
+                  <View className="flex-row gap-2">
+                    <Pressable
+                      onPress={() => { setAdbModalStep("menu"); setAdbGrantStep("idle"); }}
+                      className="flex-1 items-center border border-border py-2.5 active:opacity-70"
+                    >
+                      <Text className="font-mono text-xs text-muted-foreground">← 返回</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => { setRecordMode("microphone"); setAdbModal(false); }}
+                      className="flex-1 flex-row items-center justify-center gap-1.5 bg-primary/10 border border-primary py-2.5 active:opacity-70"
+                    >
+                      <Mic size={14} color="#F97316" strokeWidth={1.5} />
+                      <Text className="font-mono text-xs font-bold text-primary">切换麦克风</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <ScrollView
         contentContainerStyle={{ padding: 12, paddingBottom: insets.bottom + 24, gap: 12 }}
@@ -218,31 +478,40 @@ export default function BgRecordScreen() {
           </Panel>
         )}
 
-        {/* 录制模式选择（idle / error 时显示） */}
+          {/* 录制模式选择（idle / error 时显示） */}
         {(isIdle || isError) && (
           <Panel title="录制模式 RECORD MODE">
             <View className="flex-row gap-2 p-3">
-              {/* 系统内录：Android 可用，其他平台禁用并显示不支持 */}
+              {/* 系统内录：Android 可用；鸿蒙标注"高级功能（需ADB）" */}
               <Pressable
-                onPress={() => { if (isAndroid) setRecordMode("system"); }}
+                onPress={handleSelectSystem}
                 disabled={!isAndroid}
                 className={cn(
                   "flex-1 border p-3 gap-1",
                   isAndroid && recordMode === "system"
                     ? "border-primary bg-primary/10 active:opacity-70"
-                    : "border-border",
+                    : "border-border active:opacity-70",
                   !isAndroid && "opacity-40",
                 )}
               >
-                <Text className={cn(
-                  "font-mono text-xs font-bold",
-                  isAndroid && recordMode === "system" ? "text-primary" : "text-muted-foreground",
-                )}>
-                  🎵 系统内录
-                </Text>
+                <View className="flex-row items-center gap-1.5 flex-wrap">
+                  <Text className={cn(
+                    "font-mono text-xs font-bold",
+                    isAndroid && recordMode === "system" ? "text-primary" : "text-muted-foreground",
+                  )}>
+                    🎵 系统内录
+                  </Text>
+                  {isAndroid && isHarmony && (
+                    <View className="border border-primary/50 px-1 py-0.5">
+                      <Text className="font-mono text-[8px] text-primary">高级·需ADB</Text>
+                    </View>
+                  )}
+                </View>
                 {isAndroid ? (
                   <Text className="font-mono text-[10px] text-muted-foreground leading-4">
-                    Android 系统音频捕获 · 零外界噪音
+                    {isHarmony
+                      ? "鸿蒙需 ADB 授权 · 零外界噪音"
+                      : "Android 系统音频捕获 · 零外界噪音"}
                   </Text>
                 ) : (
                   <Text className="font-mono text-[9px] text-muted-foreground leading-4">
@@ -261,12 +530,19 @@ export default function BgRecordScreen() {
                     : "border-border bg-transparent",
                 )}
               >
-                <Text className={cn(
-                  "font-mono text-xs font-bold",
-                  recordMode === "microphone" ? "text-primary" : "text-muted-foreground",
-                )}>
-                  🎤 麦克风录制
-                </Text>
+                <View className="flex-row items-center gap-1.5">
+                  <Text className={cn(
+                    "font-mono text-xs font-bold",
+                    recordMode === "microphone" ? "text-primary" : "text-muted-foreground",
+                  )}>
+                    🎤 麦克风录制
+                  </Text>
+                  {isHarmony && (
+                    <View className="border border-green-500/50 px-1 py-0.5">
+                      <Text className="font-mono text-[8px] text-green-600">推荐</Text>
+                    </View>
+                  )}
+                </View>
                 <Text className="font-mono text-[10px] text-muted-foreground leading-4">
                   全平台通用 · 建议安静环境 + 靠近音源
                 </Text>
