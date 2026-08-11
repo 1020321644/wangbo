@@ -250,23 +250,28 @@ export async function runConvert(
 
   // ── 母带增强路径（masterEnhance=true）────────────────────────────────────
   if (params.masterEnhance) {
-    // ── 云端 AI 推理路径（MetricGAN+ 语音增强 via Hugging Face Inference API）─
+    // ── 母带增强：默认纯 FFmpeg DSP 专业滤镜链（开箱即用，无需任何 Token）
+    // 若用户在设置中配置了 HF Token，则额外尝试云端 AI 增强（可选）
     try {
-      const { cloudEnhanceAudio } = await import("@/lib/cloudEnhance");
-      onEngine?.("cloud-ai");
-      onProgress(0.02, "连接云端 AI 服务...");
-      const cloudResult = await cloudEnhanceAudio(sourceUri, (p, l) => onProgress(p, l));
-      if (cloudResult.ok && cloudResult.uri) {
-        await FileSystem.copyAsync({ from: cloudResult.uri, to: outUri });
-        onProgress(1, "云端 AI 增强完成 ✓");
-        return outUri;
+      const { getHfToken } = await import("@/lib/hfToken");
+      const token = await getHfToken().catch(() => "");
+      if (token) {
+        const { cloudEnhanceAudio } = await import("@/lib/cloudEnhance");
+        onEngine?.("cloud-ai");
+        onProgress(0.02, "云端 AI 增强中（已配置 Token）...");
+        const cloudResult = await cloudEnhanceAudio(sourceUri, (p, l) => onProgress(p, l));
+        if (cloudResult.ok && cloudResult.uri) {
+          await FileSystem.copyAsync({ from: cloudResult.uri, to: outUri });
+          onProgress(1, "云端 AI 增强完成 ✓");
+          return outUri;
+        }
+        console.warn("[audioEngine] 云端增强未成功，降级 FFmpeg DSP:", cloudResult.error);
       }
-      console.warn("[audioEngine] 云端增强未成功，降级 FFmpeg DSP:", cloudResult.error);
     } catch (e) {
       console.warn("[audioEngine] 云端增强异常，降级 FFmpeg DSP:", e);
     }
 
-    // 云端不可用 → FFmpeg DSP 专业母带增强兜底（保证有声音，绝不卡顿）
+    // 专业 FFmpeg DSP 母带增强（录音棚级滤镜链，默认主路径，无需 Token）
     onEngine?.("ffmpeg-dsp");
     onProgress(0.02, "FFmpeg 专业母带增强中...");
     await runFFmpegEnhance(sourceUri, outUri, params, durationMs, startTs, onProgress, FFmpegKit, ReturnCode);
@@ -376,6 +381,75 @@ async function runFFmpegEnhance(
       },
     );
   });
+}
+
+/** 调试用：生成 1 秒正弦波 WAV 并跑一遍 FFmpeg 母带增强滤镜，验证本地引擎可用 */
+export async function testMasterEnhance(
+  onProgress?: (p: number, label: string) => void,
+): Promise<{ ok: boolean; message: string }> {
+  const cacheDir = FileSystem.cacheDirectory ?? "";
+  if (process.env.EXPO_OS === "web") {
+    return { ok: true, message: "Web 预览环境跳过本地引擎测试（原生设备可用）" };
+  }
+  onProgress?.(0.1, "生成测试音频…");
+  const SR = 16000, SECS = 1, num = SR * SECS;
+  const wav = new Uint8Array(44 + num * 2);
+  const view = new DataView(wav.buffer);
+  [82, 73, 70, 70].forEach((b, i) => (wav[i] = b));
+  view.setUint32(4, 36 + num * 2, true);
+  [87, 65, 86, 69, 102, 109, 116, 32].forEach((b, i) => (wav[8 + i] = b));
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, SR, true);
+  view.setUint32(28, SR * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  [100, 97, 116, 97].forEach((b, i) => (wav[36 + i] = b));
+  view.setUint32(40, num * 2, true);
+  for (let i = 0; i < num; i++) {
+    view.setInt16(44 + i * 2, Math.round(Math.sin((2 * Math.PI * 440 * i) / SR) * 16383), true);
+  }
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < wav.length; i += CHUNK) {
+    bin += String.fromCharCode(...Array.from(wav.subarray(i, i + CHUNK)));
+  }
+  const inUri = `${cacheDir}mt_test_in_${Date.now()}.wav`;
+  const outUri = `${cacheDir}mt_test_out_${Date.now()}.wav`;
+  await FileSystem.writeAsStringAsync(inUri, btoa(bin), {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+
+  onProgress?.(0.4, "FFmpeg 母带增强处理中…");
+  const { FFmpegKit, ReturnCode } = await import("ffmpeg-kit-react-native");
+  const filter =
+    "highpass=f=80,acompressor=threshold=-20dB:ratio=4:attack=5:release=50," +
+    "equalizer=f=2000:width_type=h:width=200:g=3,equalizer=f=8000:width_type=h:width=1000:g=2," +
+    "alimiter=limit=0.95:attack=5:release=50,loudnorm=I=-16:TP=-1.5:LRA=11";
+  const command = `-i "${inUri}" -af "${filter}" -ar 48000 -sample_fmt s32 -c:a pcm_s24le -y "${outUri}"`;
+  let ok = false;
+  let errMsg = "";
+  await new Promise<void>((resolve) => {
+    FFmpegKit.executeAsync(command, async (session: any) => {
+      const rc = await session.getReturnCode();
+      if (ReturnCode.isSuccess(rc)) ok = true;
+      else errMsg = (await session.getOutput())?.slice(-150) ?? "";
+      resolve();
+    });
+  });
+  await FileSystem.deleteAsync(inUri, { idempotent: true }).catch(() => {});
+  if (ok) {
+    const stat = await FileSystem.getInfoAsync(outUri);
+    const outSize = stat.exists ? stat.size ?? 0 : 0;
+    await FileSystem.deleteAsync(outUri, { idempotent: true }).catch(() => {});
+    onProgress?.(1, "完成");
+    return {
+      ok: true,
+      message: `✅ 本地母带增强（FFmpeg DSP）测试通过！输出 ${outSize} 字节，录音棚级滤镜链正常工作，无需 Token 即可使用。`,
+    };
+  }
+  return { ok: false, message: `❌ FFmpeg 增强失败：${errMsg}` };
 }
 
 // 模拟 Stem 分离进度
