@@ -28,7 +28,6 @@ import {
   Brain,
   FlaskConical,
 } from "lucide-react-native";
-import { cloudEnhanceAudio } from "@/lib/cloudEnhance";
 import { useColors } from "@/lib/theme";
 import { cn, formatDuration, formatFileSize } from "@/lib/utils";
 import {
@@ -44,6 +43,7 @@ import {
   losslessWarning,
   modeLabel,
   runConvert,
+  testMasterEnhance,
 } from "@/lib/audioEngine";
 import { useFileStore, type AudioFile } from "@/store/fileStore";
 import { useHistoryStore } from "@/store/historyStore";
@@ -719,13 +719,16 @@ export default function HomeScreen() {
             )}
           </Panel>
 
-          {/* ── 云端 AI 调试测试面板 ────────────────────────────── */}
+          {/* ── 母带增强引擎测试面板 ────────────────────────────── */}
           <Panel>
             <View className="p-4 gap-3">
               <View className="flex-row items-center gap-2">
                 <FlaskConical size={16} color="#F59E0B" strokeWidth={1.5} />
-                <Text className="text-sm font-semibold text-foreground">云端 AI 推理测试</Text>
+                <Text className="text-sm font-semibold text-foreground">母带增强引擎测试</Text>
               </View>
+              <Text className="text-xs text-muted-foreground">
+                母带增强默认使用本地 FFmpeg 专业滤镜链（录音棚级），无需任何 Token 即可使用。点击下方按钮验证本地引擎是否正常。
+              </Text>
 
               {cloudTestStatus ? (
                 <View className={`rounded-lg p-3 ${cloudTestStatus.startsWith("✅") ? "bg-green-500/10" : cloudTestStatus.startsWith("❌") ? "bg-destructive/10" : "bg-muted"}`}>
@@ -736,50 +739,18 @@ export default function HomeScreen() {
               ) : null}
 
               <BlueprintButton
-                label={cloudTestRunning ? "测试中..." : "发送样例音频 → 测试云端 AI"}
+                label={cloudTestRunning ? "测试中..." : "测试本地母带增强引擎"}
                 variant="outline"
                 icon={<FlaskConical size={15} color="#F59E0B" strokeWidth={1.5} />}
                 onPress={async () => {
                   if (cloudTestRunning) return;
                   setCloudTestRunning(true);
-                  setCloudTestStatus("⏳ 正在生成测试音频...");
+                  setCloudTestStatus("⏳ 正在测试本地母带增强引擎...");
                   try {
-                    // 生成 1 秒 16kHz 正弦波 WAV（测试样例）
-                    const SR = 16000, SECS = 1;
-                    const numSamples = SR * SECS;
-                    const wavBuf = new Uint8Array(44 + numSamples * 2);
-                    const view = new DataView(wavBuf.buffer);
-                    // RIFF header
-                    [82,73,70,70].forEach((b,i) => wavBuf[i]=b);
-                    view.setUint32(4, 36 + numSamples*2, true);
-                    [87,65,86,69,102,109,116,32].forEach((b,i) => wavBuf[8+i]=b);
-                    view.setUint32(16,16,true); view.setUint16(20,1,true);
-                    view.setUint16(22,1,true); view.setUint32(24,SR,true);
-                    view.setUint32(28,SR*2,true); view.setUint16(32,2,true);
-                    view.setUint16(34,16,true);
-                    [100,97,116,97].forEach((b,i) => wavBuf[36+i]=b);
-                    view.setUint32(40, numSamples*2, true);
-                    for (let i=0; i<numSamples; i++) {
-                      const s = Math.round(Math.sin(2*Math.PI*440*i/SR) * 16383);
-                      view.setInt16(44+i*2, s, true);
-                    }
-                    // base64
-                    let bin = "";
-                    const CHUNK = 0x8000;
-                    for (let i=0; i<wavBuf.length; i+=CHUNK)
-                      bin += String.fromCharCode(...Array.from(wavBuf.subarray(i,i+CHUNK)));
-                    const b64 = btoa(bin);
-                    // 写临时文件
-                    const tmpUri = `${FileSystem.cacheDirectory}cloud_test_${Date.now()}.wav`;
-                    await FileSystem.writeAsStringAsync(tmpUri, b64, { encoding: FileSystem.EncodingType.Base64 });
-                    setCloudTestStatus("⏳ 已生成样例音频，正在上传云端 AI...");
-                    const result = await cloudEnhanceAudio(tmpUri, (_p, label) => setCloudTestStatus(`⏳ ${label}`));
-                    await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(()=>{});
-                    if (result.ok) {
-                      setCloudTestStatus("✅ 云端 AI 推理成功！MetricGAN+ 已正常响应，增强功能可用。");
-                    } else {
-                      setCloudTestStatus(`❌ 云端 AI 失败：${result.error ?? "未知"}\n→ 请在设置中填写 Hugging Face Token`);
-                    }
+                    const result = await testMasterEnhance((p, label) =>
+                      setCloudTestStatus(`⏳ ${label}`),
+                    );
+                    setCloudTestStatus(result.message);
                   } catch (e) {
                     setCloudTestStatus(`❌ 测试异常：${e instanceof Error ? e.message : String(e)}`);
                   } finally {
