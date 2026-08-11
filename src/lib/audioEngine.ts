@@ -333,19 +333,17 @@ async function runFFmpegEnhance(
   ReturnCode: any,
 ): Promise<void> {
   const enhanceFilter = params.enhanceLevel === "advanced"
-    ? [ // 困难模式：超复杂滤镜链
-        "aresample=192000",
+    ? [ // 困难模式：专业母带滤镜链（DSP Pro）
+        // ⚠️  stereotools 的 mwid 选项在当前 FFmpeg 版本无效，已替换为 extrastereo
         "highpass=f=60", "lowpass=f=20000",
         "acompressor=threshold=-30dB:ratio=6:attack=2:release=100",
         "equalizer=f=100:width_type=h:width=50:g=2",
         "equalizer=f=2000:width_type=h:width=200:g=3",
         "equalizer=f=10000:width_type=h:width=1000:g=1",
-        "stereotools=mlev=0.5:mwid=0.7",
-        "afftdn=nr=20:nf=-25:tn=1",
-        "aresample=96000", "aresample=192000", "aresample=96000", "aresample=48000",
+        "extrastereo=m=0.3",   // 立体声宽度增强（替代 stereotools=mlev:mwid）
+        "afftdn=nr=15:nf=-25:tn=1", // 频域降噪
         "loudnorm=I=-16:TP=-1.5:LRA=11",
         "alimiter=limit=0.95:attack=5:release=50",
-        "aresample=48000",
       ]
     : [ // 简单模式：标准母带滤镜链
         "highpass=f=80",
