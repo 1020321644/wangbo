@@ -1,7 +1,6 @@
-// cloud-enhance — 困难模式云端增强（可选）
-// 接收本地处理后的临时音频（base64），尝试多个开源 AI 音频增强接口，
-// 探针择优 + 25s 超时 + 失败自动切换。全部不可用则返回错误（客户端保留本地结果）。
-// 隐私：仅接收处理后的临时文件，处理完成后服务端不留存。
+// cloud-enhance — AI 音频增强（Hugging Face Inference API）
+// 使用 MetricGAN+ 进行语音降噪增强，HF token 由客户端传入（用户免费账号即可）
+// 增强失败 → ok: false，客户端自动降级 FFmpeg DSP，绝不出现无声
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -10,55 +9,50 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// 预置开源 AI 音频增强接口（可后续替换）
-const ENDPOINTS = [
-  "https://ai-audio-enhance.example.org/api/v1/enhance",
-  "https://openenhance.example.net/process",
-  "https://speech-restore.example.com/api/enhance",
-  "https://audio-sr.example.io/api/v2/restore",
-  "https://noiseremove.example.ai/enhance",
-  "https://hifi-restore.example.dev/api/process",
+// HF 音频增强模型（按优先级）
+const HF_MODELS = [
+  "speechbrain/metricgan-plus-voicebank", // MetricGAN+ 语音增强（主力）
+  "facebook/denoiser",                    // Meta 降噪（备用）
 ];
 
-async function probe(url: string, timeoutMs: number): Promise<boolean> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      method: "HEAD",
-      signal: controller.signal,
-    });
-    return res.ok || res.status < 500;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+const HF_TIMEOUT_MS = 30000;
 
-async function callEndpoint(
-  url: string,
-  audioB64: string,
-  timeoutMs: number,
-): Promise<string | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ audio: audioB64, format: "wav" }),
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
-    const out = json?.audio ?? json?.data ?? json?.result;
-    return typeof out === "string" ? out : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
+async function enhanceWithHF(
+  audioBuf: Uint8Array,
+  hfToken: string,
+): Promise<Uint8Array | null> {
+  for (const model of HF_MODELS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HF_TIMEOUT_MS);
+    try {
+      const res = await fetch(
+        `https://api-inference.huggingface.co/models/${model}`,
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${hfToken}`,
+            "Content-Type": "audio/wav",
+          },
+          body: audioBuf,
+          signal: controller.signal,
+        },
+      );
+      clearTimeout(timer);
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        console.warn(`[cloud-enhance] ${model} 失败 ${res.status}: ${errText}`);
+        continue;
+      }
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength < 100) { console.warn(`[cloud-enhance] ${model} 空响应`); continue; }
+      console.log(`[cloud-enhance] ✅ ${model} 成功，输出 ${buf.byteLength} bytes`);
+      return new Uint8Array(buf);
+    } catch (e) {
+      clearTimeout(timer);
+      console.warn(`[cloud-enhance] ${model} 异常:`, e);
+    }
   }
+  return null;
 }
 
 Deno.serve(async (req) => {
@@ -67,42 +61,45 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { audio } = await req.json();
+    const { audio, hfToken } = await req.json();
+
     if (!audio || typeof audio !== "string") {
       return new Response(
         JSON.stringify({ ok: false, error: "缺少音频数据" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
-
-    // 1. 探针：3s 内逐个探测，择首个可用接口
-    let chosen: string | null = null;
-    for (const ep of ENDPOINTS) {
-      if (await probe(ep, 3000)) {
-        chosen = ep;
-        break;
-      }
-    }
-
-    if (!chosen) {
+    if (!hfToken || typeof hfToken !== "string" || !hfToken.startsWith("hf_")) {
       return new Response(
-        JSON.stringify({ ok: false, error: "繁忙：暂无可用云端增强接口" }),
+        JSON.stringify({ ok: false, error: "缺少 Hugging Face Token，请前往「设置 → AI 模型」填写免费 Token" }),
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
-    // 2. 正式请求：25s 超时
-    const result = await callEndpoint(chosen, audio, 25000);
-    if (!result) {
+    // base64 → 二进制
+    const binary = atob(audio);
+    const audioBuf = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) audioBuf[i] = binary.charCodeAt(i);
+
+    // 调用 HF Inference API
+    const resultBuf = await enhanceWithHF(audioBuf, hfToken);
+    if (!resultBuf) {
       return new Response(
-        JSON.stringify({ ok: false, error: "云端增强失败，请稍后重试" }),
+        JSON.stringify({ ok: false, error: "云端增强失败，HF 模型不可用，已降级 FFmpeg DSP" }),
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
-    // 3. 返回增强后音频（服务端不留存临时文件）
+    // 二进制 → base64
+    let resultB64 = "";
+    const CHUNK = 0x8000;
+    for (let i = 0; i < resultBuf.length; i += CHUNK) {
+      resultB64 += String.fromCharCode(...Array.from(resultBuf.subarray(i, i + CHUNK)));
+    }
+    resultB64 = btoa(resultB64);
+
     return new Response(
-      JSON.stringify({ ok: true, audio: result }),
+      JSON.stringify({ ok: true, audio: resultB64 }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (e) {
