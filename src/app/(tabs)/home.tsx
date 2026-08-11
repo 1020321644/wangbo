@@ -26,7 +26,9 @@ import {
   Download,
   Zap,
   Brain,
+  FlaskConical,
 } from "lucide-react-native";
+import { cloudEnhanceAudio } from "@/lib/cloudEnhance";
 import { useColors } from "@/lib/theme";
 import { cn, formatDuration, formatFileSize } from "@/lib/utils";
 import {
@@ -127,8 +129,10 @@ export default function HomeScreen() {
   const [progressLabel, setProgressLabel] = useState("");
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cloudTestStatus, setCloudTestStatus] = useState<string | null>(null);
+  const [cloudTestRunning, setCloudTestRunning] = useState(false);
   const outFileRef = useRef<AudioFile | null>(null);
-  const engineRef = useRef<"ffmpeg-dsp" | "deepfilternet" | "audiosr" | "none">("none");
+  const engineRef = useRef<"ffmpeg-dsp" | "deepfilternet" | "audiosr" | "cloud-ai" | "none">("none");
   const [showMeta, setShowMeta] = useState(true);
   const [showEnhanceDialog, setShowEnhanceDialog] = useState(false);
   // 困难模式（AudioSR 超分辨率）启用确认弹窗
@@ -657,7 +661,7 @@ export default function HomeScreen() {
                 <CheckCircle2 size={32} color={C.cyan} strokeWidth={1.5} />
                 <Text className="font-mono text-sm font-bold text-foreground">转换完成</Text>
                 <Text className="font-mono text-[10px] text-muted-foreground">
-                  {target} · {params.sampleRate}{targetInfo.supportsBitDepth ? ` · ${params.bitDepth}` : ""}{params.masterEnhance ? ` · 母带增强 · ${engineRef.current === "ffmpeg-dsp" ? "FFmpeg DSP 增强" : "增强"}` : ""}
+                  {target} · {params.sampleRate}{targetInfo.supportsBitDepth ? ` · ${params.bitDepth}` : ""}{params.masterEnhance ? ` · 母带增强 · ${engineRef.current === "cloud-ai" ? "云端 AI 增强" : engineRef.current === "ffmpeg-dsp" ? "FFmpeg DSP 增强" : "增强"}` : ""}
                 </Text>
                 <View className="w-full flex-row gap-2">
                   <BlueprintButton
@@ -713,6 +717,77 @@ export default function HomeScreen() {
                 />
               </View>
             )}
+          </Panel>
+
+          {/* ── 云端 AI 调试测试面板 ────────────────────────────── */}
+          <Panel>
+            <View className="p-4 gap-3">
+              <View className="flex-row items-center gap-2">
+                <FlaskConical size={16} color="#F59E0B" strokeWidth={1.5} />
+                <Text className="text-sm font-semibold text-foreground">云端 AI 推理测试</Text>
+              </View>
+
+              {cloudTestStatus ? (
+                <View className={`rounded-lg p-3 ${cloudTestStatus.startsWith("✅") ? "bg-green-500/10" : cloudTestStatus.startsWith("❌") ? "bg-destructive/10" : "bg-muted"}`}>
+                  <Text className={`text-sm ${cloudTestStatus.startsWith("✅") ? "text-green-600" : cloudTestStatus.startsWith("❌") ? "text-destructive" : "text-muted-foreground"}`}>
+                    {cloudTestStatus}
+                  </Text>
+                </View>
+              ) : null}
+
+              <BlueprintButton
+                label={cloudTestRunning ? "测试中..." : "发送样例音频 → 测试云端 AI"}
+                variant="outline"
+                icon={<FlaskConical size={15} color="#F59E0B" strokeWidth={1.5} />}
+                onPress={async () => {
+                  if (cloudTestRunning) return;
+                  setCloudTestRunning(true);
+                  setCloudTestStatus("⏳ 正在生成测试音频...");
+                  try {
+                    // 生成 1 秒 16kHz 正弦波 WAV（测试样例）
+                    const SR = 16000, SECS = 1;
+                    const numSamples = SR * SECS;
+                    const wavBuf = new Uint8Array(44 + numSamples * 2);
+                    const view = new DataView(wavBuf.buffer);
+                    // RIFF header
+                    [82,73,70,70].forEach((b,i) => wavBuf[i]=b);
+                    view.setUint32(4, 36 + numSamples*2, true);
+                    [87,65,86,69,102,109,116,32].forEach((b,i) => wavBuf[8+i]=b);
+                    view.setUint32(16,16,true); view.setUint16(20,1,true);
+                    view.setUint16(22,1,true); view.setUint32(24,SR,true);
+                    view.setUint32(28,SR*2,true); view.setUint16(32,2,true);
+                    view.setUint16(34,16,true);
+                    [100,97,116,97].forEach((b,i) => wavBuf[36+i]=b);
+                    view.setUint32(40, numSamples*2, true);
+                    for (let i=0; i<numSamples; i++) {
+                      const s = Math.round(Math.sin(2*Math.PI*440*i/SR) * 16383);
+                      view.setInt16(44+i*2, s, true);
+                    }
+                    // base64
+                    let bin = "";
+                    const CHUNK = 0x8000;
+                    for (let i=0; i<wavBuf.length; i+=CHUNK)
+                      bin += String.fromCharCode(...Array.from(wavBuf.subarray(i,i+CHUNK)));
+                    const b64 = btoa(bin);
+                    // 写临时文件
+                    const tmpUri = `${FileSystem.cacheDirectory}cloud_test_${Date.now()}.wav`;
+                    await FileSystem.writeAsStringAsync(tmpUri, b64, { encoding: FileSystem.EncodingType.Base64 });
+                    setCloudTestStatus("⏳ 已生成样例音频，正在上传云端 AI...");
+                    const result = await cloudEnhanceAudio(tmpUri, (_p, label) => setCloudTestStatus(`⏳ ${label}`));
+                    await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(()=>{});
+                    if (result.ok) {
+                      setCloudTestStatus("✅ 云端 AI 推理成功！MetricGAN+ 已正常响应，增强功能可用。");
+                    } else {
+                      setCloudTestStatus(`❌ 云端 AI 失败：${result.error ?? "未知"}\n→ 请在设置中填写 Hugging Face Token`);
+                    }
+                  } catch (e) {
+                    setCloudTestStatus(`❌ 测试异常：${e instanceof Error ? e.message : String(e)}`);
+                  } finally {
+                    setCloudTestRunning(false);
+                  }
+                }}
+              />
+            </View>
           </Panel>
         </ScrollView>
       </KeyboardAvoidingView>
