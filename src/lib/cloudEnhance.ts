@@ -1,11 +1,12 @@
 /**
- * cloudEnhance — 困难模式云端增强客户端
+ * cloudEnhance — 云端 AI 音频增强客户端
  *
- * 隐私：仅上传「本地处理后的临时音频」，不上传原始文件。
- * 通过 Edge Function (cloud-enhance) 代理调用外网开源 AI 接口，
- * 接口选择/超时/容错由服务端处理；失败时客户端保留本地结果。
+ * 通过 Supabase Edge Function (cloud-enhance) 调用 HF Inference API
+ * 进行 MetricGAN+ 语音增强。HF token 由用户在设置中填写，存于 SecureStore。
+ * 云端失败时客户端自动降级 FFmpeg DSP，保证有声音绝不无声。
  */
 import * as FileSystem from "expo-file-system/legacy";
+import { getHfToken } from "@/lib/hfToken";
 
 const MAX_BYTES = 20 * 1024 * 1024; // 20MB 上限（云端增强）
 
@@ -38,8 +39,11 @@ export async function cloudEnhanceAudio(
   onProgress?.(0.3, "云端增强中… 预计 25 秒");
 
   const { supabase } = await import("@/client/supabase");
+  // 读取用户 HF token（设置页填写，存于 SecureStore）
+  const hfToken = await getHfToken().catch(() => "");
+
   const { data, error } = await supabase.functions.invoke("cloud-enhance", {
-    body: { audio: b64 },
+    body: { audio: b64, hfToken },
     method: "POST",
   });
 
